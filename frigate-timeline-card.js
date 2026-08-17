@@ -143,6 +143,18 @@ class FrigateTimelineCard extends HTMLElement {
       this._clockInterval = null;
     }
     this._teardownWebRtc();
+    this._teardownHls();
+  }
+
+  _teardownHls() {
+    if (this._hls) {
+      try {
+        this._hls.destroy();
+      } catch (_) {
+        /* already gone */
+      }
+      this._hls = null;
+    }
   }
 
   _cameraObjectId() {
@@ -517,6 +529,7 @@ class FrigateTimelineCard extends HTMLElement {
     this._playingClip = null;
     const token = (this._liveToken = (this._liveToken || 0) + 1);
     this._teardownWebRtc();
+    this._teardownHls();
     this._stageEl.innerHTML = "";
     this._streamEl = null;
 
@@ -606,10 +619,44 @@ class FrigateTimelineCard extends HTMLElement {
     }
   }
 
-  _playClip(url, label) {
-    this._playingClip = { url, label };
+  /** Lazily loads hls.js for browsers without native HLS (Safari/iOS/macOS
+   * play .m3u8 natively via `<video src>`, no library needed there). */
+  _loadHlsJs() {
+    if (window.Hls) return Promise.resolve();
+    if (this._hlsLoadPromise) return this._hlsLoadPromise;
+    this._hlsLoadPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js";
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+    return this._hlsLoadPromise;
+  }
+
+  /**
+   * Plays a short window of *recorded* footage centered on `tsMs`, via
+   * Frigate's `/vod/<camera>/start/<start>/end/<end>/index.m3u8` HLS
+   * endpoint — real segmented streaming, not a single `clip.mp4` download.
+   * That distinction matters: a Frigate "clip" spans a whole review item,
+   * which for a long continuous presence can be many minutes and tens to
+   * hundreds of MB — playing it as one non-seekable `<video src>` file is
+   * what made tapping the timeline effectively a no-op (the browser just
+   * sat there trying to buffer it). VOD HLS is exactly what Frigate's own
+   * UI uses for timeline scrubbing, and works for ANY point in time, not
+   * only points that happen to land on a detected event.
+   */
+  _playAt(tsMs) {
+    const camId = this._cameraObjectId();
+    const base = this._config.frigate_url.replace(/\/+$/, "");
+    const startSec = Math.floor(tsMs / 1000) - 15;
+    const endSec = Math.floor(tsMs / 1000) + 45;
+    const url = `${base}/vod/${camId}/start/${startSec}/end/${endSec}/index.m3u8`;
+
+    this._playingClip = { url, tsMs };
     this._liveToken = (this._liveToken || 0) + 1; // invalidate any in-flight _showLive()
     this._teardownWebRtc();
+    this._teardownHls();
     this._stageEl.innerHTML = "";
     this._streamEl = null;
 
@@ -621,39 +668,40 @@ class FrigateTimelineCard extends HTMLElement {
       this._showLive();
     });
     const video = document.createElement("video");
-    video.src = url;
     video.autoplay = true;
     video.muted = false;
     video.playsInline = true;
     video.controls = false; // custom tap-to-toggle below — never native controls
-    video.title = label || "";
     this._stageEl.appendChild(video);
     this._stageEl.appendChild(back);
     this._addTapToggleControls(video, { showMute: false });
+
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = url; // Safari/iOS/macOS: native HLS, no library needed
+      return;
+    }
+    const attach = () => {
+      if (!window.Hls?.isSupported()) return;
+      if (this._hls) {
+        try {
+          this._hls.destroy();
+        } catch (_) {
+          /* already gone */
+        }
+      }
+      const hls = new window.Hls();
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      this._hls = hls;
+    };
+    if (window.Hls) attach();
+    else this._loadHlsJs().then(attach).catch((err) => console.warn("[frigate-timeline-card] hls.js failed to load", err));
   }
 
   _seekTo(frac) {
     const win = this._currentWindow();
     const ts = win.start + frac * (win.end - win.start);
-    const nearest = this._nearestEvent(ts);
-    if (!nearest) return;
-    const base = this._config.frigate_url.replace(/\/+$/, "");
-    this._playClip(`${base}/api/events/${nearest.id}/clip.mp4`, nearest.label);
-  }
-
-  _nearestEvent(ts) {
-    let best = null;
-    let bestDiff = Infinity;
-    for (const ev of this._events) {
-      const evMs = Number(ev.start_time) * 1000;
-      if (!Number.isFinite(evMs)) continue;
-      const diff = Math.abs(evMs - ts);
-      if (diff < bestDiff) {
-        bestDiff = diff;
-        best = ev;
-      }
-    }
-    return best;
+    this._playAt(ts);
   }
 
   async _ensureData() {
@@ -822,8 +870,13 @@ class FrigateTimelineCardEditor extends HTMLElement {
     this.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px 16px;">
         <div id="ftc-ed-entity"></div>
-        <ha-textfield id="ftc-ed-url" label="Frigate URL (ex: http://192.168.1.11:5000)" style="width:100%"></ha-textfield>
-        <ha-textfield id="ftc-ed-camera" label="Nume cameră în Frigate (opțional, ex: spate)" style="width:100%"></ha-textfield>
+        <div style="display:flex;gap:8px;">
+          <ha-textfield id="ftc-ed-host" label="Server Frigate (ex: 192.168.1.11)" style="flex:2"></ha-textfield>
+          <ha-textfield id="ftc-ed-port" label="Port" type="number" style="flex:1"></ha-textfield>
+        </div>
+        <div id="ftc-ed-camera-row">
+          <ha-textfield id="ftc-ed-camera" label="Nume cameră în Frigate (opțional, ex: spate)" style="width:100%"></ha-textfield>
+        </div>
         <ha-textfield id="ftc-ed-instance" label="Frigate instance id (implicit: frigate)" style="width:100%"></ha-textfield>
         <ha-textfield id="ftc-ed-height" label="Înălțime timeline (px)" type="number" style="width:100%"></ha-textfield>
       </div>
@@ -835,14 +888,91 @@ class FrigateTimelineCardEditor extends HTMLElement {
     picker.addEventListener("value-changed", (e) => {
       e.stopPropagation();
       this._update("camera_entity", e.detail.value);
+      this._suggestFrigateCamera();
     });
     entityRow.appendChild(picker);
     this._entityPicker = picker;
 
-    this.querySelector("#ftc-ed-url").addEventListener("input", (e) => this._update("frigate_url", e.target.value));
+    const onHostPortChange = () => {
+      const host = this.querySelector("#ftc-ed-host")?.value?.trim() || "";
+      const port = this.querySelector("#ftc-ed-port")?.value?.trim() || "";
+      const url = host ? `http://${host}${port ? `:${port}` : ""}` : "";
+      this._update("frigate_url", url);
+      this._fetchFrigateCameraList();
+    };
+    this.querySelector("#ftc-ed-host").addEventListener("input", onHostPortChange);
+    this.querySelector("#ftc-ed-port").addEventListener("input", onHostPortChange);
     this.querySelector("#ftc-ed-camera").addEventListener("input", (e) => this._update("frigate_camera", e.target.value));
     this.querySelector("#ftc-ed-instance").addEventListener("input", (e) => this._update("frigate_instance_id", e.target.value));
     this.querySelector("#ftc-ed-height").addEventListener("input", (e) => this._update("height", Number(e.target.value) || 44));
+
+    this._fetchFrigateCameraList();
+  }
+
+  /** host/port are UI-only, split from the stored `frigate_url` for display. */
+  _parseFrigateUrl(url) {
+    try {
+      const u = new URL(url);
+      return { host: u.hostname, port: u.port || "" };
+    } catch (_) {
+      return { host: "", port: "" };
+    }
+  }
+
+  /** Fetches Frigate's real camera list (from /api/config) and swaps the
+   * free-text "frigate_camera" field for a dropdown once it succeeds — this
+   * is what actually links the chosen HA camera to its Frigate name, instead
+   * of relying on the `camera_<name>` stripping heuristic. Silently keeps
+   * the text field as a fallback if the fetch fails (e.g. CORS). */
+  async _fetchFrigateCameraList() {
+    const url = this._config.frigate_url;
+    if (!url) return;
+    const base = String(url).replace(/\/+$/, "");
+    const token = (this._camFetchToken = (this._camFetchToken || 0) + 1);
+    try {
+      const res = await fetch(`${base}/api/config`);
+      if (!res.ok) return;
+      const cfg = await res.json();
+      if (token !== this._camFetchToken) return;
+      const names = Object.keys(cfg?.cameras || {});
+      if (!names.length) return;
+      this._frigateCameraNames = names;
+      this._renderCameraField();
+      this._suggestFrigateCamera();
+    } catch (_) {
+      // CORS-blocked or unreachable — the plain text field stays as-is.
+    }
+  }
+
+  _renderCameraField() {
+    const row = this.querySelector("#ftc-ed-camera-row");
+    if (!row || !this._frigateCameraNames?.length) return;
+    row.innerHTML = `
+      <ha-select id="ftc-ed-camera-select" label="Cameră în Frigate" style="width:100%">
+        ${this._frigateCameraNames
+          .map((n) => `<mwc-list-item value="${n}">${n}</mwc-list-item>`)
+          .join("")}
+      </ha-select>
+    `;
+    const sel = row.querySelector("#ftc-ed-camera-select");
+    sel.value = this._config.frigate_camera || "";
+    sel.addEventListener("selected", (e) => this._update("frigate_camera", e.target.value));
+    sel.addEventListener("closed", (e) => e.stopPropagation());
+  }
+
+  /** Best-effort auto-link: match the HA camera entity's object_id (with or
+   * without a leading `camera_`) against Frigate's real camera list. */
+  _suggestFrigateCamera() {
+    if (this._config.frigate_camera || !this._frigateCameraNames?.length) return;
+    const entity = this._config.camera_entity;
+    if (!entity) return;
+    const objectId = String(entity).split(".").slice(1).join(".");
+    const candidates = [objectId, objectId.replace(/^camera_/, "")];
+    const match = this._frigateCameraNames.find((n) => candidates.includes(n));
+    if (match) {
+      this._update("frigate_camera", match);
+      this._renderCameraField();
+    }
   }
 
   _sync() {
@@ -854,8 +984,10 @@ class FrigateTimelineCardEditor extends HTMLElement {
       const el = this.querySelector(id);
       if (el && el.value !== String(val ?? "")) el.value = val ?? "";
     };
-    set("#ftc-ed-url", this._config.frigate_url);
-    set("#ftc-ed-camera", this._config.frigate_camera);
+    const { host, port } = this._parseFrigateUrl(this._config.frigate_url);
+    set("#ftc-ed-host", host);
+    set("#ftc-ed-port", port);
+    if (!this._frigateCameraNames?.length) set("#ftc-ed-camera", this._config.frigate_camera);
     set("#ftc-ed-instance", this._config.frigate_instance_id);
     set("#ftc-ed-height", this._config.height ?? 44);
   }
