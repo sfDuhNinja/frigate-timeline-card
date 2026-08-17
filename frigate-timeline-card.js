@@ -171,6 +171,7 @@ class FrigateTimelineCard extends HTMLElement {
     this.innerHTML = `
       <ha-card>
         <div class="ftc-stage"></div>
+        <div class="ftc-controlbar"></div>
         <div class="ftc-daynav">
           <button class="ftc-navbtn" data-dir="-1" title="Previous day">‹</button>
           <span class="ftc-daylabel"></span>
@@ -199,17 +200,21 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-stage video {
           width: 100%; height: 100%; display: block; object-fit: contain; background: #000;
         }
-        frigate-timeline-card .ftc-back-btn {
-          position: absolute; top: 8px; left: 8px; z-index: 5;
-          background: rgba(0, 0, 0, 0.6); color: #fff; border: none; border-radius: 8px;
-          padding: 6px 12px; font-size: 12px; font-weight: 600; letter-spacing: 0.03em;
-          cursor: pointer;
+        frigate-timeline-card .ftc-controlbar {
+          display: flex; align-items: center; gap: 4px; padding: 6px 8px;
+          background: var(--card-background-color, #1c1c1c);
+          border-bottom: 1px solid rgba(127, 127, 127, 0.15);
         }
-        frigate-timeline-card .ftc-mute-btn {
-          position: absolute; top: 8px; right: 8px; z-index: 5;
-          background: rgba(0, 0, 0, 0.6); color: #fff; border: none; border-radius: 50%;
-          width: 32px; height: 32px; font-size: 15px; line-height: 1; cursor: pointer;
+        frigate-timeline-card .ftc-ctlbtn {
+          background: none; border: none; color: var(--primary-text-color, #fff);
+          font-size: 16px; line-height: 1; cursor: pointer; padding: 6px 10px; border-radius: 6px;
         }
+        frigate-timeline-card .ftc-ctlbtn:hover { background: rgba(127, 127, 127, 0.15); }
+        frigate-timeline-card .ftc-ctl-spacer { flex: 1; }
+        frigate-timeline-card .ftc-live-btn {
+          font-size: 12px; font-weight: 700; letter-spacing: 0.02em; opacity: 0.4;
+        }
+        frigate-timeline-card .ftc-live-btn.active { opacity: 1; }
         frigate-timeline-card .ftc-daynav {
           display: flex; align-items: center; justify-content: center; gap: 6px;
           padding: 6px 10px 0; font-size: 13px; color: var(--primary-text-color, #fff);
@@ -251,11 +256,13 @@ class FrigateTimelineCard extends HTMLElement {
           padding: 3px 9px; border-radius: 12px; white-space: nowrap;
           box-shadow: 0 2px 5px rgba(0, 0, 0, 0.4); pointer-events: none; z-index: 4;
         }
+        frigate-timeline-card .ftc-now-pill.clip { background: #2f8fc0; }
         frigate-timeline-card .ftc-now-line {
           position: absolute; top: -8px; bottom: 0; width: 0;
           border-left: 1px dashed rgba(255, 255, 255, 0.5);
           transform: translateX(-50%); pointer-events: none; z-index: 3;
         }
+        frigate-timeline-card .ftc-now-line.clip { border-left-color: rgba(79, 195, 247, 0.7); }
         frigate-timeline-card .ftc-scrub {
           position: absolute; top: 0; bottom: 0; width: 2px; background: #4fc3f7;
           box-shadow: 0 0 6px rgba(79, 195, 247, 0.9); pointer-events: none;
@@ -275,6 +282,7 @@ class FrigateTimelineCard extends HTMLElement {
     this._nowLineEl = this.querySelector(".ftc-now-line");
     this._zoomLabelEl = this.querySelector(".ftc-zoomlabel");
     this._trackEl.style.height = `${this._config.height}px`;
+    this._buildControlBar();
     this._wireTrackInteraction();
     this.querySelectorAll(".ftc-navbtn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -500,33 +508,93 @@ class FrigateTimelineCard extends HTMLElement {
     }
   }
 
-  _addTapToggleControls(video, { showMute } = {}) {
-    // Our own minimal controls — never `video.controls = true` (that's the
-    // browser's native chrome, AVKit-styled on Safari/iOS, exactly what this
-    // card avoids). Tap the video to play/pause; an optional small mute
-    // button top-right for live.
+  /**
+   * Wires the current `<video>` (live or clip) to the shared control bar
+   * created once in `_build()`, and to tap-to-toggle on the video itself.
+   * Never `video.controls = true` — that's the browser's native chrome
+   * (AVKit-styled on Safari/iOS), exactly what this card avoids. All
+   * controls live in `.ftc-controlbar` below the stage, not as overlays on
+   * top of the picture.
+   */
+  _bindVideoControls(video) {
+    this._videoEl = video;
     video.addEventListener("click", () => {
       if (video.paused) video.play().catch(() => {});
       else video.pause();
     });
-    if (showMute) {
-      const muteBtn = document.createElement("button");
-      muteBtn.className = "ftc-mute-btn";
-      const sync = () => {
-        muteBtn.textContent = video.muted ? "🔇" : "🔊";
-      };
-      sync();
-      muteBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        video.muted = !video.muted;
-        sync();
-      });
-      this._stageEl.appendChild(muteBtn);
-    }
+    const syncPlay = () => {
+      if (this._playBtnEl) this._playBtnEl.textContent = video.paused ? "▶" : "⏸";
+    };
+    const syncMute = () => {
+      if (this._muteBtnEl) this._muteBtnEl.textContent = video.muted ? "🔇" : "🔊";
+    };
+    video.addEventListener("play", syncPlay);
+    video.addEventListener("pause", syncPlay);
+    video.addEventListener("volumechange", syncMute);
+    syncPlay();
+    syncMute();
+    if (this._liveBtnEl) this._liveBtnEl.classList.toggle("active", this._pillMode !== "live");
+  }
+
+  /** Builds the shared control bar once — play/pause, mute, fullscreen,
+   * and "back to live" — wired generically against `this._videoEl`, so the
+   * same buttons keep working across live ↔ clip swaps without rebuilding. */
+  _buildControlBar() {
+    const bar = this.querySelector(".ftc-controlbar");
+    const playBtn = document.createElement("button");
+    playBtn.className = "ftc-ctlbtn";
+    playBtn.textContent = "▶";
+    playBtn.title = "Play/Pause";
+    playBtn.addEventListener("click", () => {
+      if (!this._videoEl) return;
+      if (this._videoEl.paused) this._videoEl.play().catch(() => {});
+      else this._videoEl.pause();
+    });
+
+    const muteBtn = document.createElement("button");
+    muteBtn.className = "ftc-ctlbtn";
+    muteBtn.textContent = "🔊";
+    muteBtn.title = "Mute/Unmute";
+    muteBtn.addEventListener("click", () => {
+      if (!this._videoEl) return;
+      this._videoEl.muted = !this._videoEl.muted;
+    });
+
+    const fsBtn = document.createElement("button");
+    fsBtn.className = "ftc-ctlbtn";
+    fsBtn.textContent = "⛶";
+    fsBtn.title = "Fullscreen";
+    fsBtn.addEventListener("click", () => {
+      const doc = document;
+      const isFs = doc.fullscreenElement || doc.webkitFullscreenElement;
+      if (isFs) {
+        (doc.exitFullscreen || doc.webkitExitFullscreen)?.call(doc);
+        return;
+      }
+      const el = this._stageEl;
+      if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      else if (this._videoEl?.webkitEnterFullscreen) this._videoEl.webkitEnterFullscreen(); // iPhone Safari
+    });
+
+    const spacer = document.createElement("span");
+    spacer.className = "ftc-ctl-spacer";
+
+    const liveBtn = document.createElement("button");
+    liveBtn.className = "ftc-ctlbtn ftc-live-btn";
+    liveBtn.textContent = "🔴 Live";
+    liveBtn.title = "Revino la live";
+    liveBtn.addEventListener("click", () => this._showLive());
+
+    bar.append(playBtn, muteBtn, fsBtn, spacer, liveBtn);
+    this._playBtnEl = playBtn;
+    this._muteBtnEl = muteBtn;
+    this._liveBtnEl = liveBtn;
   }
 
   async _showLive() {
     this._playingClip = null;
+    this._pillMode = "live";
     const token = (this._liveToken = (this._liveToken || 0) + 1);
     this._teardownWebRtc();
     this._teardownHls();
@@ -535,12 +603,12 @@ class FrigateTimelineCard extends HTMLElement {
 
     const video = document.createElement("video");
     video.autoplay = true;
-    video.muted = true; // starts muted so autoplay is allowed; our mute button toggles it
+    video.muted = true; // starts muted so autoplay is allowed; the mute button toggles it
     video.playsInline = true;
     video.controls = false;
     this._stageEl.appendChild(video);
     this._streamEl = video;
-    this._addTapToggleControls(video, { showMute: true });
+    this._bindVideoControls(video);
 
     if (typeof RTCPeerConnection === "undefined" || !this._hass) return;
     const entityId = this._config.camera_entity;
@@ -626,7 +694,16 @@ class FrigateTimelineCard extends HTMLElement {
     if (this._hlsLoadPromise) return this._hlsLoadPromise;
     this._hlsLoadPromise = new Promise((resolve, reject) => {
       const script = document.createElement("script");
-      script.src = "https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js";
+      // Vendored same-origin, not an external CDN: HA setups commonly block
+      // outbound script loads (network policy, offline install, or just no
+      // route to jsdelivr from wherever the dashboard is opened), which is
+      // exactly what silently broke playback here — hls.js never loaded, so
+      // the <video> got no source at all and just sat black while the pill
+      // (set from the click position before any real progress) looked live.
+      // `import.meta.url` resolves this file's own URL — whether served via
+      // HACS (/hacsfiles/...) or a manual /local/... deploy — so the sibling
+      // path is always correct without hardcoding either prefix.
+      script.src = new URL("./hls.min.js", import.meta.url).href;
       script.onload = resolve;
       script.onerror = reject;
       document.head.appendChild(script);
@@ -649,49 +726,57 @@ class FrigateTimelineCard extends HTMLElement {
   _playAt(tsMs) {
     const camId = this._cameraObjectId();
     const base = this._config.frigate_url.replace(/\/+$/, "");
-    const startSec = Math.floor(tsMs / 1000) - 15;
-    const endSec = Math.floor(tsMs / 1000) + 45;
+    const nowSec = Math.floor(Date.now() / 1000);
+    let startSec = Math.floor(tsMs / 1000) - 20;
+    // Clamp the end a few seconds behind "now" — Frigate needs a moment to
+    // finalize very recent segments, and asking HLS for a range that
+    // partly doesn't exist yet is exactly what made playback choppy/stuck
+    // when tapping near the live edge of the timeline.
+    let endSec = Math.min(Math.floor(tsMs / 1000) + 40, nowSec - 5);
+    if (endSec <= startSec) endSec = startSec + 15;
     const url = `${base}/vod/${camId}/start/${startSec}/end/${endSec}/index.m3u8`;
 
     this._playingClip = { url, tsMs };
+    this._pillMode = "clip";
+    this._clipStartSec = startSec;
+    this._clipCurrentMs = tsMs;
     this._liveToken = (this._liveToken || 0) + 1; // invalidate any in-flight _showLive()
     this._teardownWebRtc();
     this._teardownHls();
     this._stageEl.innerHTML = "";
     this._streamEl = null;
 
-    const back = document.createElement("button");
-    back.className = "ftc-back-btn";
-    back.textContent = "● LIVE";
-    back.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this._showLive();
-    });
     const video = document.createElement("video");
     video.autoplay = true;
     video.muted = false;
     video.playsInline = true;
-    video.controls = false; // custom tap-to-toggle below — never native controls
+    video.controls = false; // controls live in the shared bar below — never native
+    video.addEventListener("timeupdate", () => {
+      this._clipCurrentMs = (this._clipStartSec + video.currentTime) * 1000;
+      this._updateNowPill();
+    });
     this._stageEl.appendChild(video);
-    this._stageEl.appendChild(back);
-    this._addTapToggleControls(video, { showMute: false });
+    this._bindVideoControls(video);
 
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = url; // Safari/iOS/macOS: native HLS, no library needed
-      return;
-    }
+    // Always go through hls.js — including on Safari, via MediaSource
+    // Extensions — rather than handing Safari the raw .m3u8 URL. Native
+    // HLS playback on Safari/iOS/macOS shows its own AirPlay/fullscreen
+    // chrome unconditionally for that code path, regardless of the
+    // `controls` attribute; that chrome is exactly the "native player"
+    // this card exists to avoid. Once hls.js feeds the video via MSE,
+    // Safari treats it as a plain buffered video and adds none of that.
     const attach = () => {
-      if (!window.Hls?.isSupported()) return;
-      if (this._hls) {
-        try {
-          this._hls.destroy();
-        } catch (_) {
-          /* already gone */
-        }
+      if (!window.Hls?.isSupported()) {
+        // Extremely old/unsupported browser — last-resort native fallback.
+        video.src = url;
+        return;
       }
-      const hls = new window.Hls();
+      const hls = new window.Hls({ maxBufferLength: 30, backBufferLength: 30 });
       hls.loadSource(url);
       hls.attachMedia(video);
+      hls.on(window.Hls.Events.ERROR, (_evt, data) => {
+        if (data?.fatal) console.warn("[frigate-timeline-card] hls.js fatal error", data);
+      });
       this._hls = hls;
     };
     if (window.Hls) attach();
@@ -783,10 +868,13 @@ class FrigateTimelineCard extends HTMLElement {
   _updateNowPill() {
     if (!this._nowPillEl) return;
     const win = this._currentWindow();
-    const now = Date.now();
+    const isClip = this._pillMode === "clip";
+    const now = isClip ? this._clipCurrentMs ?? Date.now() : Date.now();
     const inWindow = now >= win.start && now <= win.end;
     this._nowPillEl.style.display = inWindow ? "" : "none";
     this._nowLineEl.style.display = inWindow ? "" : "none";
+    this._nowPillEl.classList.toggle("clip", isClip);
+    this._nowLineEl.classList.toggle("clip", isClip);
     if (!inWindow) return;
     const pct = ((now - win.start) / (win.end - win.start)) * 100;
     this._nowPillEl.style.left = `${pct}%`;
