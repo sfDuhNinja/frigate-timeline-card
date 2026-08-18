@@ -383,14 +383,19 @@ class FrigateTimelineCard extends HTMLElement {
     this._renderTimeline();
   }
 
-  /** Resets to the configured default zoom window (10h unless overridden),
-   * centered on "now" when viewing today so the most recent activity is
-   * visible by default, or on the tail end of the day when browsing a past
-   * day. Called on initial load and whenever the viewed day changes. */
+  /** Resets to the configured default zoom window (10h unless overridden).
+   * "Now" (or the tail end of the day, when browsing a past day) sits 10
+   * minutes in from the window's right edge — not centered — so the window
+   * reads mostly as "what just happened", with a small margin rather than
+   * "now" pinned exactly at the edge. Called on initial load and whenever
+   * the viewed day changes. */
   _resetZoom() {
     this._windowHours = this._defaultZoomHours();
     const day = dayWindow(this._dayKey);
-    this._centerMs = Math.min(Date.now(), day.end);
+    const RIGHT_MARGIN_MS = 10 * 60 * 1000;
+    const halfMs = (this._windowHours * 3600000) / 2;
+    const anchorMs = Math.min(Date.now(), day.end);
+    this._centerMs = anchorMs + RIGHT_MARGIN_MS - halfMs;
     this._updateZoomLabel();
     this._renderTimeline();
   }
