@@ -405,21 +405,26 @@ class FrigateTimelineCard extends HTMLElement {
   _currentWindow() {
     const day = dayWindow(this._dayKey);
     if (!day) return { start: 0, end: 1 };
-    if (!this._windowHours || this._windowHours >= 24) return day;
+    // Never show more than 15 minutes of "future" past now on today — that
+    // stretch is always empty (no data past now), so letting the window
+    // extend toward midnight just wastes screen space. Zoom/pan/reset all
+    // funnel through here, so the cap holds everywhere, not just on load.
+    const dayEnd = this._dayKey === todayKey() ? Math.min(day.end, Date.now() + 15 * 60 * 1000) : day.end;
+    if (!this._windowHours || this._windowHours >= 24) return { start: day.start, end: dayEnd };
     const half = (this._windowHours * 3600000) / 2;
-    const center = this._centerMs ?? day.start + (day.end - day.start) / 2;
+    const center = this._centerMs ?? day.start + (dayEnd - day.start) / 2;
     let start = center - half;
     let end = center + half;
     if (start < day.start) {
       end += day.start - start;
       start = day.start;
     }
-    if (end > day.end) {
-      start -= end - day.end;
-      end = day.end;
+    if (end > dayEnd) {
+      start -= end - dayEnd;
+      end = dayEnd;
     }
     start = Math.max(start, day.start);
-    end = Math.min(end, day.end);
+    end = Math.min(end, dayEnd);
     return { start, end };
   }
 
