@@ -7,17 +7,32 @@
  * timeline to play the nearest ~1min of recorded footage inline; a "Live"
  * button returns to the live stream.
  *
- * The camera is selected directly from Frigate — not an HA camera entity.
- * Live view goes straight to Frigate's own bundled go2rtc instance over
- * WebRTC (`<go2rtc>:1984/api/webrtc?src=<camera>_<stream>`), and event/
- * review data is scoped to that same Frigate camera name. Nothing here goes
- * through Home Assistant's camera/WebRTC integration — `hass` is only used
- * for the events-websocket fallback and locale-aware clock formatting.
+ * Live view uses `<ha-camera-stream>` bound to `camera_entity` — same
+ * element, same setup, as the companion camera-gallery-card fork's
+ * already-proven-working live view. Event/review data is scoped by
+ * `frigate_camera` (Frigate's own camera name, not the HA entity), fetched
+ * WebSocket-first through Home Assistant (`frigate/events/get`), same
+ * priority order as that fork, with REST to `frigate_url` as a secondary
+ * enhancement (exact severity from /api/review has no WS equivalent).
+ *
+ * Why WS-first and ha-camera-stream, not a raw connection straight to
+ * Frigate's LAN address: this card originally tried exactly that (raw
+ * `ws://<lan-ip>:1984/...` for live, REST-first for events) and it broke
+ * outright the moment the dashboard itself is served over https (Tailscale,
+ * Nabu Casa, any TLS reverse proxy — common, not an edge case). Browsers
+ * block that as mixed content with no visible error. Routing everything
+ * through Home Assistant's own same-origin connection sidesteps it
+ * entirely — `<ha-camera-stream>` and `frigate/events/get` both go over
+ * HA's existing secure WebSocket, never a raw request to the camera's LAN
+ * IP. Direct REST to `frigate_url` (events enhancement, clip HLS playback)
+ * still requires the dashboard be reachable to that address unencrypted —
+ * fine on plain http/LAN access, silently unavailable over https, which is
+ * why the WS path is primary rather than a fallback.
  *
  * All `<video>` elements run with `controls=false`; play/pause, mute, and
  * fullscreen live in a control bar below the stage, not as overlays.
- * Playback always goes through hls.js — bundled directly into this file,
- * not loaded from a CDN — even on Safari, via MediaSource Extensions,
+ * Recorded-clip playback goes through hls.js — bundled directly into this
+ * file, not loaded from a CDN — even on Safari, via MediaSource Extensions,
  * rather than handing Safari a raw .m3u8 (native HLS playback on Safari/
  * iOS/macOS shows its own AirPlay/fullscreen chrome unconditionally,
  * exactly the native player this card exists to avoid).
@@ -25,21 +40,12 @@
  * No gallery, no thumbnails, no PTZ/talkback/zoom — deliberately narrow
  * scope so the card stays light.
  *
- * Review/event data is fetched two ways and merged:
- *  - direct REST to `frigate_url` (fast, but many Frigate deployments don't
- *    send CORS headers on /api/*, so the browser silently blocks it)
- *  - HA's Frigate integration WebSocket bridge (`frigate/events/get`),
- *    which is same-origin and always works, used as the events/click-to-play
- *    source whenever REST is unavailable, with severity approximated from
- *    label + score since the WS bridge doesn't expose /api/review data.
- *
  * Config:
  *   type: custom:frigate-timeline-card
- *   frigate_url: http://192.168.1.11:5000   # required — Frigate REST base, reachable from the browser
- *   frigate_camera: spate                   # required — Frigate's own camera name (not an HA entity)
- *   frigate_stream: main                    # optional — go2rtc stream suffix: "main" (full quality) or "sub" (less lag). Default: main
- *   go2rtc_url: http://192.168.1.11:1984    # optional — defaults to the frigate_url host on port 1984 (go2rtc's default)
- *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id, for the events WS fallback (default "frigate")
+ *   camera_entity: camera.camera_spate      # required — HA camera entity, for the ha-camera-stream live view
+ *   frigate_url: http://192.168.1.11:5000   # required — Frigate REST base (events enhancement + clip playback; needs http/LAN reachability from the browser)
+ *   frigate_camera: spate                   # required — Frigate's own camera name, for scoping events/review data
+ *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id, for the events WS call (default "frigate")
  *   height: 44                              # optional — timeline strip height in px
  */
 
@@ -87,7 +93,10 @@ class FrigateTimelineCard extends HTMLElement {
     if (!config.frigate_camera) {
       throw new Error("frigate-timeline-card: 'frigate_camera' is required");
     }
-    this._config = { height: 44, frigate_instance_id: "frigate", frigate_stream: "main", ...config };
+    if (!config.camera_entity) {
+      throw new Error("frigate-timeline-card: 'camera_entity' is required (for live view via ha-camera-stream)");
+    }
+    this._config = { height: 44, frigate_instance_id: "frigate", ...config };
     this._dayKey = todayKey();
     this._segments = [];
     this._events = [];
@@ -98,9 +107,14 @@ class FrigateTimelineCard extends HTMLElement {
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
-    // Live view goes straight to go2rtc and doesn't need `hass` at all —
-    // only the events websocket fallback does, so that's the only thing
-    // gated on its first arrival here.
+    // ha-camera-stream needs `hass`/`stateObj` for the live view, and the
+    // events fallback needs `hass.connection` — both gated on its first
+    // arrival, since `_build()` runs before `hass` exists at all.
+    if (first && !this._playingClip) this._showLive();
+    if (this._streamEl?.tagName === "HA-CAMERA-STREAM") {
+      this._streamEl.hass = hass;
+      this._streamEl.stateObj = hass.states?.[this._config.camera_entity];
+    }
     if (first) this._ensureData();
     // Lovelace calls this setter on every state-changed event across the
     // whole dashboard, which can be several times a second. Rebuilding the
@@ -119,8 +133,9 @@ class FrigateTimelineCard extends HTMLElement {
     return document.createElement("frigate-timeline-card-editor");
   }
 
-  static getStubConfig() {
-    return { frigate_url: "", frigate_camera: "", height: 44 };
+  static getStubConfig(hass) {
+    const cameraEntity = Object.keys(hass?.states || {}).find((id) => id.startsWith("camera."));
+    return { camera_entity: cameraEntity || "", frigate_url: "", frigate_camera: "", height: 44 };
   }
 
   getCardSize() {
@@ -558,8 +573,13 @@ class FrigateTimelineCard extends HTMLElement {
     muteBtn.textContent = "🔊";
     muteBtn.title = "Mute/Unmute";
     muteBtn.addEventListener("click", () => {
-      if (!this._videoEl) return;
-      this._videoEl.muted = !this._videoEl.muted;
+      // Clip mode: this._videoEl is a plain <video>. Live mode: it's null
+      // (ha-camera-stream isn't a <video>) — toggle the stream element's
+      // own public `.muted` property instead.
+      const target = this._videoEl || this._streamEl;
+      if (!target) return;
+      target.muted = !target.muted;
+      muteBtn.textContent = target.muted ? "🔇" : "🔊";
     });
 
     const fsBtn = document.createElement("button");
@@ -594,33 +614,23 @@ class FrigateTimelineCard extends HTMLElement {
     this._liveBtnEl = liveBtn;
   }
 
-  /** go2rtc's own base URL — defaults to the Frigate host on go2rtc's
-   * standard port 1984 (what Frigate bundles it on), overridable via
-   * `go2rtc_url` for setups where it differs. */
-  _go2rtcUrl() {
-    if (this._config.go2rtc_url) return String(this._config.go2rtc_url).replace(/\/+$/, "");
-    try {
-      const u = new URL(this._config.frigate_url);
-      return `${u.protocol}//${u.hostname}:1984`;
-    } catch (_) {
-      return "";
-    }
-  }
-
-  /** go2rtc stream name for the selected Frigate camera — Frigate registers
-   * both a full-res `<camera>_main` and a lighter `<camera>_sub` stream in
-   * go2rtc; `frigate_stream` picks which (default "main"). */
-  _go2rtcStreamName() {
-    const suffix = this._config.frigate_stream || "main";
-    return `${this._config.frigate_camera}_${suffix}`;
-  }
-
   /**
-   * Live view goes straight to Frigate's own go2rtc instance — not through
-   * Home Assistant's `camera/webrtc/*` bridge, and not tied to any HA
-   * camera entity at all. This is the same go2rtc WebRTC signaling
-   * protocol (WS handshake at `/api/webrtc?src=<name>`) already proven
-   * working in the companion camera-gallery-card fork's live view.
+   * Live view uses `<ha-camera-stream>`, exactly the way the companion
+   * camera-gallery-card fork's proven-working live view does it — same
+   * element, same properties, same `customElements.whenDefined()` await
+   * before creating it.
+   *
+   * A prior version of this card connected straight to Frigate's go2rtc
+   * over a raw `ws://<lan-ip>:1984/...` — that only works when the
+   * dashboard itself is loaded over plain http. The moment it's accessed
+   * over https (Tailscale, Nabu Casa, any TLS reverse proxy — a very
+   * common setup, not an edge case), the browser blocks that connection
+   * outright as mixed content, with no visible error: live view (and, for
+   * the same reason, direct HLS clip playback and REST event/review
+   * fetches) just silently stopped working. `<ha-camera-stream>` doesn't
+   * have this problem because it goes through Home Assistant's own
+   * same-origin, already-secure connection rather than a raw fetch/WS to
+   * the camera's LAN address.
    */
   async _showLive() {
     this._playingClip = null;
@@ -631,88 +641,26 @@ class FrigateTimelineCard extends HTMLElement {
     this._stageEl.innerHTML = "";
     this._streamEl = null;
 
-    const video = document.createElement("video");
-    video.autoplay = true;
-    video.muted = true; // starts muted so autoplay is allowed; the mute button toggles it
-    video.playsInline = true;
-    video.controls = false;
-    this._stageEl.appendChild(video);
-    this._streamEl = video;
-    this._bindVideoControls(video);
+    if (!this._hass || !this._config.camera_entity) return;
+    await customElements.whenDefined("ha-camera-stream");
+    if (token !== this._liveToken) return;
 
-    if (typeof RTCPeerConnection === "undefined") return;
-    const go2rtcBase = this._go2rtcUrl();
-    if (!go2rtcBase) return;
-    const streamName = this._go2rtcStreamName();
-
-    try {
-      const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-      this._rtcPeerConnection = pc;
-      pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "recvonly" });
-      pc.ontrack = (e) => {
-        if (e.streams?.[0]) video.srcObject = e.streams[0];
-      };
-
-      const wsUrl = `${go2rtcBase.replace(/^http/, "ws")}/api/webrtc?src=${encodeURIComponent(streamName)}`;
-      if (typeof location !== "undefined" && location.protocol === "https:" && wsUrl.startsWith("ws://")) {
-        throw new Error(
-          `Mixed content blocked: page is HTTPS but go2rtc is http://. Put go2rtc behind a TLS reverse proxy, or set go2rtc_url to an https:// address.`
-        );
-      }
-
-      const ws = new WebSocket(wsUrl);
-      this._rtcWebSocket = ws;
-
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error(`go2rtc WS timeout after 10s (${wsUrl})`)), 10000);
-        ws.onopen = async () => {
-          try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            ws.send(JSON.stringify({ type: "webrtc/offer", value: pc.localDescription.sdp }));
-          } catch (err) {
-            reject(err);
-          }
-        };
-        ws.onmessage = async (evt) => {
-          try {
-            const msg = JSON.parse(evt.data);
-            if (msg.type === "webrtc/answer") {
-              await pc.setRemoteDescription({ type: "answer", sdp: msg.value });
-              clearTimeout(timeout);
-              resolve();
-            } else if (msg.type === "webrtc/candidate") {
-              pc.addIceCandidate({ candidate: msg.value, sdpMid: "0" }).catch(() => {});
-            } else if (msg.type === "error") {
-              clearTimeout(timeout);
-              reject(new Error(`go2rtc reported: ${msg.value}`));
-            }
-          } catch (err) {
-            reject(err);
-          }
-        };
-        ws.onerror = () => {
-          clearTimeout(timeout);
-          reject(new Error("go2rtc WS error"));
-        };
-        ws.onclose = (e) => {
-          if (e.code !== 1000) {
-            clearTimeout(timeout);
-            reject(new Error(`go2rtc WS closed (code ${e.code})`));
-          }
-        };
-      });
-      if (token !== this._liveToken) return;
-
-      pc.onicecandidate = (e) => {
-        if (e.candidate && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "webrtc/candidate", value: e.candidate.candidate }));
-        }
-      };
-    } catch (err) {
-      console.warn("[frigate-timeline-card] go2rtc live view failed", err);
-    }
+    const player = document.createElement("ha-camera-stream");
+    player.stateObj = this._hass.states?.[this._config.camera_entity];
+    player.hass = this._hass;
+    player.muted = true; // starts muted so autoplay is allowed; the mute button toggles it
+    player.controls = false;
+    player.style.cssText = "display:block;width:100%;height:100%;";
+    this._stageEl.appendChild(player);
+    this._streamEl = player;
+    // ha-camera-stream is a wrapper (renders ha-hls-player/ha-web-rtc-player
+    // internally, not a plain <video>) — it doesn't expose the play/pause
+    // API our control bar binds to, and pausing a live feed isn't a
+    // meaningful action anyway, so the play button is simply inert here;
+    // mute toggles its public `.muted` property directly.
+    this._videoEl = null;
+    if (this._muteBtnEl) this._muteBtnEl.textContent = player.muted ? "🔇" : "🔊";
+    if (this._liveBtnEl) this._liveBtnEl.classList.toggle("active", false);
   }
 
   /** Lazily loads hls.js for browsers without native HLS (Safari/iOS/macOS
@@ -820,22 +768,16 @@ class FrigateTimelineCard extends HTMLElement {
     const afterSec = Math.floor(win.start / 1000);
     const beforeSec = Math.ceil(win.end / 1000);
 
-    let reviews = null;
-    try {
-      const res = await fetch(`${base}/api/review?after=${afterSec}&before=${beforeSec}`);
-      if (res.ok) reviews = await res.json();
-    } catch (err) {
-      console.warn("[frigate-timeline-card] REST /api/review unavailable (CORS or network) — falling back", err);
-    }
-
+    // Same priority the companion camera-gallery-card fork uses: WS first
+    // (same-origin through HA, always reachable regardless of how the
+    // dashboard itself is being accessed — LAN http, Tailscale https,
+    // whatever), REST second as a fast-path enhancement when it happens to
+    // be reachable. Doing REST first (as this card did originally) meant
+    // events silently vanished under mixed-content blocking (dashboard
+    // served https, frigate_url is a plain http:// LAN address) with no
+    // visible error — exactly what broke playback and event display here.
     let events = null;
-    try {
-      const res = await fetch(`${base}/api/events?after=${afterSec}&before=${beforeSec}&limit=500`);
-      if (res.ok) events = await res.json();
-    } catch (err) {
-      console.warn("[frigate-timeline-card] REST /api/events unavailable (CORS or network) — falling back", err);
-    }
-    if (!Array.isArray(events) && this._hass?.connection) {
+    if (this._hass?.connection) {
       try {
         let wsResult = await this._hass.connection.sendMessagePromise({
           type: "frigate/events/get",
@@ -849,6 +791,25 @@ class FrigateTimelineCard extends HTMLElement {
       } catch (err) {
         console.warn("[frigate-timeline-card] WS frigate/events/get failed", err);
       }
+    }
+    if (!Array.isArray(events)) {
+      try {
+        const res = await fetch(`${base}/api/events?after=${afterSec}&before=${beforeSec}&limit=500`);
+        if (res.ok) events = await res.json();
+      } catch (err) {
+        console.warn("[frigate-timeline-card] REST /api/events unavailable (CORS or mixed-content) — using WS result only", err);
+      }
+    }
+
+    // /api/review has no WS equivalent — REST is the only source for exact
+    // severity. Falls back to approximating from `events` (already fetched
+    // above, WS-first) when REST is unreachable.
+    let reviews = null;
+    try {
+      const res = await fetch(`${base}/api/review?after=${afterSec}&before=${beforeSec}`);
+      if (res.ok) reviews = await res.json();
+    } catch (err) {
+      console.warn("[frigate-timeline-card] REST /api/review unavailable (CORS or mixed-content) — approximating from events", err);
     }
 
     if (this._fetchKey !== key) return; // a newer fetch superseded this one
@@ -970,12 +931,14 @@ class FrigateTimelineCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    if (this._entityPicker) this._entityPicker.hass = hass;
   }
 
   _build() {
     this._built = true;
     this.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px 16px;">
+        <div id="ftc-ed-entity"></div>
         <div style="display:flex;gap:8px;">
           <ha-textfield id="ftc-ed-host" label="Server Frigate (ex: 192.168.1.11)" style="flex:2"></ha-textfield>
           <ha-textfield id="ftc-ed-port" label="Port" type="number" style="flex:1"></ha-textfield>
@@ -983,18 +946,21 @@ class FrigateTimelineCardEditor extends HTMLElement {
         <div id="ftc-ed-camera-row">
           <ha-textfield id="ftc-ed-camera" label="Cameră în Frigate (ex: spate)" style="width:100%"></ha-textfield>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <span style="font-size:13px;color:var(--secondary-text-color,#999);">Stream live:</span>
-          <select id="ftc-ed-stream" style="flex:1;padding:8px;border-radius:6px;">
-            <option value="main">main (calitate maximă)</option>
-            <option value="sub">sub (mai puțin lag)</option>
-          </select>
-        </div>
-        <ha-textfield id="ftc-ed-go2rtc" label="go2rtc URL (opțional, implicit port 1984 pe serverul Frigate)" style="width:100%"></ha-textfield>
         <ha-textfield id="ftc-ed-instance" label="Frigate instance id (implicit: frigate)" style="width:100%"></ha-textfield>
         <ha-textfield id="ftc-ed-height" label="Înălțime timeline (px)" type="number" style="width:100%"></ha-textfield>
       </div>
     `;
+    const entityRow = this.querySelector("#ftc-ed-entity");
+    const picker = document.createElement("ha-entity-picker");
+    picker.includeDomains = ["camera"];
+    picker.label = "Cameră (live view, via ha-camera-stream)";
+    picker.addEventListener("value-changed", (e) => {
+      e.stopPropagation();
+      this._update("camera_entity", e.detail.value);
+    });
+    entityRow.appendChild(picker);
+    this._entityPicker = picker;
+
     const onHostPortChange = () => {
       const host = this.querySelector("#ftc-ed-host")?.value?.trim() || "";
       const port = this.querySelector("#ftc-ed-port")?.value?.trim() || "";
@@ -1005,8 +971,6 @@ class FrigateTimelineCardEditor extends HTMLElement {
     this.querySelector("#ftc-ed-host").addEventListener("input", onHostPortChange);
     this.querySelector("#ftc-ed-port").addEventListener("input", onHostPortChange);
     this.querySelector("#ftc-ed-camera").addEventListener("input", (e) => this._update("frigate_camera", e.target.value));
-    this.querySelector("#ftc-ed-stream").addEventListener("change", (e) => this._update("frigate_stream", e.target.value));
-    this.querySelector("#ftc-ed-go2rtc").addEventListener("input", (e) => this._update("go2rtc_url", e.target.value));
     this.querySelector("#ftc-ed-instance").addEventListener("input", (e) => this._update("frigate_instance_id", e.target.value));
     this.querySelector("#ftc-ed-height").addEventListener("input", (e) => this._update("height", Number(e.target.value) || 44));
 
@@ -1063,6 +1027,10 @@ class FrigateTimelineCardEditor extends HTMLElement {
   }
 
   _sync() {
+    if (this._entityPicker) {
+      this._entityPicker.value = this._config.camera_entity || "";
+      if (this._hass) this._entityPicker.hass = this._hass;
+    }
     const set = (id, val) => {
       const el = this.querySelector(id);
       if (el && el.value !== String(val ?? "")) el.value = val ?? "";
@@ -1071,8 +1039,6 @@ class FrigateTimelineCardEditor extends HTMLElement {
     set("#ftc-ed-host", host);
     set("#ftc-ed-port", port);
     if (!this._frigateCameraNames?.length) set("#ftc-ed-camera", this._config.frigate_camera);
-    set("#ftc-ed-stream", this._config.frigate_stream || "main");
-    set("#ftc-ed-go2rtc", this._config.go2rtc_url);
     set("#ftc-ed-instance", this._config.frigate_instance_id);
     set("#ftc-ed-height", this._config.height ?? 44);
   }
