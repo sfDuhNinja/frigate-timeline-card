@@ -1753,6 +1753,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
       const url = host ? `http://${host}${port ? `:${port}` : ""}` : "";
       this._update("frigate_url", url);
       this._fetchFrigateCameraList();
+      this._updateGo2rtcPlaceholder();
     };
     this.querySelector("#ftc-ed-host").addEventListener("input", onHostPortChange);
     this.querySelector("#ftc-ed-port").addEventListener("input", onHostPortChange);
@@ -1781,6 +1782,20 @@ class FrigateTimelineCardEditor extends HTMLElement {
     } catch (_) {
       return { host: "", port: "" };
     }
+  }
+
+  /** go2rtc_url is optional — it already defaults at runtime to the
+   * Frigate host on port 1984 (go2rtc's standard port, see the main
+   * card's `_go2rtcUrl()`). Rather than requiring the user to retype that
+   * same host here, show it live as the field's placeholder, computed
+   * from whatever's currently in the host field — so the field can stay
+   * empty (using the real default) while still showing exactly what
+   * that default is. */
+  _updateGo2rtcPlaceholder() {
+    const input = this.querySelector("#ftc-ed-go2rtc-url");
+    if (!input) return;
+    const host = this.querySelector("#ftc-ed-host")?.value?.trim() || "";
+    input.placeholder = host ? `http://${host}:1984` : "http://192.168.1.11:1984";
   }
 
   /** Fetches Frigate's real camera list (from /api/config) and swaps the
@@ -1872,6 +1887,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
     const { host, port } = this._parseFrigateUrl(this._config.frigate_url);
     set("#ftc-ed-host", host);
     set("#ftc-ed-port", port);
+    this._updateGo2rtcPlaceholder();
     if (!this._frigateCameraNames?.length) set("#ftc-ed-camera", this._config.frigate_camera);
     set("#ftc-ed-instance", this._config.frigate_instance_id);
     set("#ftc-ed-height", this._config.height ?? 44);
