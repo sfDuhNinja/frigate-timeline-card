@@ -178,6 +178,21 @@ class FrigateTimelineCard extends HTMLElement {
     }
   }
 
+  /** Overlays a short message on the stage — used when clip playback fails
+   * outright (e.g. Frigate unreachable, or blocked by CORS with no viable
+   * fallback) so it reads as "broken" instead of silently staying black. */
+  _showStageError(msg) {
+    this._clearStageError();
+    const el = document.createElement("div");
+    el.className = "ftc-stage-error";
+    el.textContent = msg;
+    this._stageEl.appendChild(el);
+  }
+
+  _clearStageError() {
+    this._stageEl?.querySelector(".ftc-stage-error")?.remove();
+  }
+
   _cameraObjectId() {
     return this._config.frigate_camera;
   }
@@ -288,6 +303,11 @@ class FrigateTimelineCard extends HTMLElement {
           color: var(--secondary-text-color, #999); margin-top: 2px;
         }
         frigate-timeline-card .ftc-tick { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+        frigate-timeline-card .ftc-stage-error {
+          position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+          text-align: center; padding: 16px; color: #f2b632; font-size: 13px; line-height: 1.4;
+          background: rgba(0, 0, 0, 0.55); pointer-events: none; z-index: 5;
+        }
       </style>
     `;
     this._stageEl = this.querySelector(".ftc-stage");
@@ -728,19 +748,38 @@ class FrigateTimelineCard extends HTMLElement {
       this._clipCurrentMs = (this._clipStartSec + video.currentTime) * 1000;
       this._updateNowPill();
     });
+    video.addEventListener("error", () => {
+      // Fires for the native-fallback path too (e.g. Frigate genuinely
+      // unreachable) — hls.js fatal errors are handled separately below,
+      // this is the last-resort "nothing at all could play" case.
+      if (!this._hls) this._showStageError("Nu s-a putut încărca înregistrarea de la Frigate.");
+    });
     this._stageEl.appendChild(video);
     this._bindVideoControls(video);
 
-    // Always go through hls.js — including on Safari, via MediaSource
-    // Extensions — rather than handing Safari the raw .m3u8 URL. Native
-    // HLS playback on Safari/iOS/macOS shows its own AirPlay/fullscreen
-    // chrome unconditionally for that code path, regardless of the
-    // `controls` attribute; that chrome is exactly the "native player"
+    // Always go through hls.js first — including on Safari, via MediaSource
+    // Extensions — rather than handing Safari the raw .m3u8 URL up front.
+    // Native HLS playback on Safari/iOS/macOS shows its own AirPlay/
+    // fullscreen chrome unconditionally for that code path, regardless of
+    // the `controls` attribute; that chrome is exactly the "native player"
     // this card exists to avoid. Once hls.js feeds the video via MSE,
     // Safari treats it as a plain buffered video and adds none of that.
+    //
+    // hls.js does its own fetching (XHR) of the manifest/segments, which —
+    // unlike a plain `<video src>` resource load — IS subject to CORS. Many
+    // self-hosted Frigate instances don't send `Access-Control-Allow-Origin`
+    // (no built-in option for it; needs a fronting reverse proxy), which
+    // fails hls.js outright with no visible error: same URL loads fine when
+    // opened directly (plain navigation, not CORS-gated), so this is easy to
+    // mistake for a server-side bug. On a fatal hls.js error, fall back to
+    // handing the browser the raw URL via `video.src` — a native resource
+    // load like `<img src>`, exempt from CORS — which works if the browser
+    // can play HLS natively (Safari). Chrome/Firefox have no native HLS and
+    // still need hls.js, so for them a CORS failure is unrecoverable
+    // client-side; surface it instead of staying silently black.
+    let triedNativeFallback = false;
     const attach = () => {
       if (!window.Hls?.isSupported()) {
-        // Extremely old/unsupported browser — last-resort native fallback.
         video.src = url;
         return;
       }
@@ -748,7 +787,19 @@ class FrigateTimelineCard extends HTMLElement {
       hls.loadSource(url);
       hls.attachMedia(video);
       hls.on(window.Hls.Events.ERROR, (_evt, data) => {
-        if (data?.fatal) console.warn("[frigate-timeline-card] hls.js fatal error", data);
+        if (!data?.fatal) return;
+        console.warn("[frigate-timeline-card] hls.js fatal error", data);
+        if (triedNativeFallback) return;
+        triedNativeFallback = true;
+        this._teardownHls();
+        const canPlayNative = video.canPlayType("application/vnd.apple.mpegurl");
+        if (canPlayNative) {
+          video.src = url;
+        } else {
+          this._showStageError(
+            "Nu s-a putut încărca clipul (posibil CORS lipsă pe Frigate pentru originea Home Assistant) — vezi consola browserului."
+          );
+        }
       });
       this._hls = hls;
     };
