@@ -286,6 +286,14 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-live-dot {
           width: 8px; height: 8px; border-radius: 50%; background: #ef4444; flex: none;
         }
+        frigate-timeline-card .ftc-live-btn.on-live .ftc-live-dot {
+          animation: ftc-live-breathe 1.8s ease-in-out infinite;
+        }
+        @keyframes ftc-live-breathe {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.4; transform: scale(0.8); }
+        }
+        frigate-timeline-card .ftc-ctlbtn.ftc-hidden { display: none; }
         frigate-timeline-card .ftc-daynav {
           display: flex; align-items: center; gap: 6px;
           font-size: 13px; color: var(--primary-text-color, #fff);
@@ -602,6 +610,7 @@ class FrigateTimelineCard extends HTMLElement {
    */
   _bindVideoControls(video) {
     this._videoEl = video;
+    if (this._playBtnEl) this._playBtnEl.classList.remove("ftc-hidden"); // clip mode — play/pause is meaningful here
     video.addEventListener("click", () => {
       if (video.paused) video.play().catch(() => {});
       else video.pause();
@@ -617,7 +626,10 @@ class FrigateTimelineCard extends HTMLElement {
     video.addEventListener("volumechange", syncMute);
     syncPlay();
     syncMute();
-    if (this._liveBtnEl) this._liveBtnEl.classList.toggle("active", this._pillMode !== "live");
+    if (this._liveBtnEl) {
+      this._liveBtnEl.classList.toggle("active", this._pillMode !== "live");
+      this._liveBtnEl.classList.toggle("on-live", false);
+    }
   }
 
   /** Recursively finds a `<video>` element inside `node`, descending into
@@ -779,7 +791,11 @@ class FrigateTimelineCard extends HTMLElement {
     // mute toggles its public `.muted` property directly.
     this._videoEl = null;
     if (this._muteBtnEl) this._muteBtnEl.innerHTML = player.muted ? ICON_VOLUME_OFF : ICON_VOLUME_UP;
-    if (this._liveBtnEl) this._liveBtnEl.classList.toggle("active", false);
+    if (this._playBtnEl) this._playBtnEl.classList.add("ftc-hidden"); // inert on live — nothing meaningful to pause
+    if (this._liveBtnEl) {
+      this._liveBtnEl.classList.toggle("active", false);
+      this._liveBtnEl.classList.toggle("on-live", true);
+    }
   }
 
   /** Lazily loads hls.js for browsers without native HLS (Safari/iOS/macOS
