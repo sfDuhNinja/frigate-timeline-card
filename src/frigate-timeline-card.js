@@ -31,11 +31,19 @@
  *
  * All `<video>` elements run with `controls=false`; play/pause, mute, and
  * fullscreen live in a control bar below the stage, not as overlays.
- * Recorded-clip playback goes through hls.js — bundled directly into this
- * file, not loaded from a CDN — even on Safari, via MediaSource Extensions,
- * rather than handing Safari a raw .m3u8 (native HLS playback on Safari/
- * iOS/macOS shows its own AirPlay/fullscreen chrome unconditionally,
- * exactly the native player this card exists to avoid).
+ * Recorded-clip playback hands the browser a plain `video.src` — HLS
+ * (`.m3u8`) on Safari via its native decoder, an MP4 range clip everywhere
+ * else — the same technique the companion camera-gallery-card fork uses.
+ * A resource load like that is never CORS-gated, unlike hls.js's own
+ * XHR-based manifest/segment fetching, which most self-hosted Frigate
+ * instances silently fail (no `Access-Control-Allow-Origin`, and Frigate
+ * has no built-in setting for it). hls.js — still bundled directly into
+ * this file, not loaded from a CDN — is kept only as a last-resort fallback
+ * if the native `<video>` element itself errors out. One accepted
+ * trade-off: native HLS playback on Safari/iOS/macOS shows its own
+ * AirPlay/fullscreen chrome unconditionally, which an hls.js-fed
+ * MediaSource element wouldn't — a working native player beats a silently
+ * black one.
  *
  * No gallery, no thumbnails, no PTZ/talkback/zoom — deliberately narrow
  * scope so the card stays light.
@@ -700,16 +708,40 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   /**
-   * Plays a short window of *recorded* footage centered on `tsMs`, via
-   * Frigate's `/vod/<camera>/start/<start>/end/<end>/index.m3u8` HLS
-   * endpoint — real segmented streaming, not a single `clip.mp4` download.
-   * That distinction matters: a Frigate "clip" spans a whole review item,
-   * which for a long continuous presence can be many minutes and tens to
-   * hundreds of MB — playing it as one non-seekable `<video src>` file is
-   * what made tapping the timeline effectively a no-op (the browser just
-   * sat there trying to buffer it). VOD HLS is exactly what Frigate's own
-   * UI uses for timeline scrubbing, and works for ANY point in time, not
-   * only points that happen to land on a detected event.
+   * Plays a short window of *recorded* footage centered on `tsMs`.
+   *
+   * Primary path is a plain `video.src` resource load — exactly what the
+   * companion camera-gallery-card fork does for its own clip playback
+   * (`<video src=${url} controls autoplay …>`, no hls.js involved at all).
+   * That's not a stylistic choice: a `video.src` load is a *resource* fetch,
+   * the same category as `<img src>`, and browsers never subject those to
+   * CORS. hls.js, by contrast, fetches the manifest/segments itself via XHR
+   * to feed MediaSource — a JS-initiated cross-origin request, which IS
+   * CORS-gated. Most self-hosted Frigate instances don't send
+   * `Access-Control-Allow-Origin` (Frigate has no built-in setting for it;
+   * needs a fronting reverse proxy), so hls.js fails outright and silently —
+   * the exact same URL loads fine when opened directly in a tab, which is
+   * what made this look like a server bug rather than a browser/CORS one.
+   *
+   * Two native routes depending on what the browser can natively decode:
+   *   - Safari (native HLS support): the VOD `.m3u8` URL directly. Safari's
+   *     own HLS engine handles the manifest + segments as a resource load,
+   *     not JS fetches — no CORS involved. (Trade-off: this reintroduces
+   *     Safari's own AirPlay/fullscreen chrome that hls.js-fed MSE playback
+   *     otherwise avoids — accepted, since a working native player beats a
+   *     silently black one.)
+   *   - Everywhere else (Chrome, Firefox, …): Frigate's ranged
+   *     `/api/<camera>/start/<start>/end/<end>/clip.mp4` endpoint — a plain
+   *     progressive MP4 of the same bounded ~1min window the VOD endpoint
+   *     would have covered, natively playable with zero JS-side decoding
+   *     library needed anywhere.
+   *
+   * hls.js (still vendored) is kept purely as a last-resort fallback if the
+   * native `<video>` element itself errors out — e.g. an old Frigate build
+   * without the `clip.mp4` ranged endpoint. In a properly CORS-configured
+   * setup this fallback would actually succeed and give smoother
+   * segmented/adaptive playback than the flat MP4, so it's worth trying
+   * before giving up.
    */
   _playAt(tsMs) {
     const camId = this._cameraObjectId();
@@ -717,14 +749,15 @@ class FrigateTimelineCard extends HTMLElement {
     const nowSec = Math.floor(Date.now() / 1000);
     let startSec = Math.floor(tsMs / 1000) - 20;
     // Clamp the end a few seconds behind "now" — Frigate needs a moment to
-    // finalize very recent segments, and asking HLS for a range that
-    // partly doesn't exist yet is exactly what made playback choppy/stuck
-    // when tapping near the live edge of the timeline.
+    // finalize very recent segments, and asking for a range that partly
+    // doesn't exist yet is exactly what made playback choppy/stuck when
+    // tapping near the live edge of the timeline.
     let endSec = Math.min(Math.floor(tsMs / 1000) + 40, nowSec - 5);
     if (endSec <= startSec) endSec = startSec + 15;
-    const url = `${base}/vod/${camId}/start/${startSec}/end/${endSec}/index.m3u8`;
+    const hlsUrl = `${base}/vod/${camId}/start/${startSec}/end/${endSec}/index.m3u8`;
+    const mp4Url = `${base}/${camId}/start/${startSec}/end/${endSec}/clip.mp4`;
 
-    this._playingClip = { url, tsMs };
+    this._playingClip = { url: hlsUrl, tsMs };
     this._pillMode = "clip";
     this._clipStartSec = startSec;
     this._clipCurrentMs = tsMs;
@@ -743,63 +776,46 @@ class FrigateTimelineCard extends HTMLElement {
       this._clipCurrentMs = (this._clipStartSec + video.currentTime) * 1000;
       this._updateNowPill();
     });
-    video.addEventListener("error", () => {
-      // Fires for the native-fallback path too (e.g. Frigate genuinely
-      // unreachable) — hls.js fatal errors are handled separately below,
-      // this is the last-resort "nothing at all could play" case.
-      if (!this._hls) this._showStageError("Nu s-a putut încărca înregistrarea de la Frigate.");
-    });
+
+    const canPlayNativeHls = !!video.canPlayType("application/vnd.apple.mpegurl");
+
+    const tryHlsJs = () => {
+      const attach = () => {
+        if (!window.Hls?.isSupported()) {
+          this._showStageError(
+            "Nu s-a putut încărca clipul de la Frigate — verifică CORS (Access-Control-Allow-Origin) pe server."
+          );
+          return;
+        }
+        const hls = new window.Hls({ maxBufferLength: 30, backBufferLength: 30 });
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+        hls.on(window.Hls.Events.ERROR, (_evt, data) => {
+          if (!data?.fatal) return;
+          console.warn("[frigate-timeline-card] hls.js fatal error", data);
+          this._teardownHls();
+          this._showStageError(
+            "Nu s-a putut încărca clipul de la Frigate — verifică CORS (Access-Control-Allow-Origin) pe server."
+          );
+        });
+        this._hls = hls;
+      };
+      if (window.Hls) attach();
+      else this._loadHlsJs().then(attach).catch((err) => console.warn("[frigate-timeline-card] hls.js failed to load", err));
+    };
+
+    video.addEventListener(
+      "error",
+      () => {
+        console.warn("[frigate-timeline-card] native <video> playback failed, falling back to hls.js", video.error);
+        tryHlsJs();
+      },
+      { once: true }
+    );
+
+    video.src = canPlayNativeHls ? hlsUrl : mp4Url;
     this._stageEl.appendChild(video);
     this._bindVideoControls(video);
-
-    // Always go through hls.js first — including on Safari, via MediaSource
-    // Extensions — rather than handing Safari the raw .m3u8 URL up front.
-    // Native HLS playback on Safari/iOS/macOS shows its own AirPlay/
-    // fullscreen chrome unconditionally for that code path, regardless of
-    // the `controls` attribute; that chrome is exactly the "native player"
-    // this card exists to avoid. Once hls.js feeds the video via MSE,
-    // Safari treats it as a plain buffered video and adds none of that.
-    //
-    // hls.js does its own fetching (XHR) of the manifest/segments, which —
-    // unlike a plain `<video src>` resource load — IS subject to CORS. Many
-    // self-hosted Frigate instances don't send `Access-Control-Allow-Origin`
-    // (no built-in option for it; needs a fronting reverse proxy), which
-    // fails hls.js outright with no visible error: same URL loads fine when
-    // opened directly (plain navigation, not CORS-gated), so this is easy to
-    // mistake for a server-side bug. On a fatal hls.js error, fall back to
-    // handing the browser the raw URL via `video.src` — a native resource
-    // load like `<img src>`, exempt from CORS — which works if the browser
-    // can play HLS natively (Safari). Chrome/Firefox have no native HLS and
-    // still need hls.js, so for them a CORS failure is unrecoverable
-    // client-side; surface it instead of staying silently black.
-    let triedNativeFallback = false;
-    const attach = () => {
-      if (!window.Hls?.isSupported()) {
-        video.src = url;
-        return;
-      }
-      const hls = new window.Hls({ maxBufferLength: 30, backBufferLength: 30 });
-      hls.loadSource(url);
-      hls.attachMedia(video);
-      hls.on(window.Hls.Events.ERROR, (_evt, data) => {
-        if (!data?.fatal) return;
-        console.warn("[frigate-timeline-card] hls.js fatal error", data);
-        if (triedNativeFallback) return;
-        triedNativeFallback = true;
-        this._teardownHls();
-        const canPlayNative = video.canPlayType("application/vnd.apple.mpegurl");
-        if (canPlayNative) {
-          video.src = url;
-        } else {
-          this._showStageError(
-            "Nu s-a putut încărca clipul (posibil CORS lipsă pe Frigate pentru originea Home Assistant) — vezi consola browserului."
-          );
-        }
-      });
-      this._hls = hls;
-    };
-    if (window.Hls) attach();
-    else this._loadHlsJs().then(attach).catch((err) => console.warn("[frigate-timeline-card] hls.js failed to load", err));
   }
 
   _seekTo(frac) {
