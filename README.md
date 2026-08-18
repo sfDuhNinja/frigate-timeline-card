@@ -30,7 +30,7 @@ frigate_instance_id: frigate            # optional — Frigate HA integration co
 height: 44                              # optional — timeline strip height in px
 default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default: 10)
 auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default: 0, disabled)
-live_source: ha                         # optional — "ha" (default) or "frigate" (direct go2rtc WebRTC, bypasses HA's WebRTC bridge)
+live_source: ha                         # optional — "ha" (default) or "frigate" (direct go2rtc MSE, bypasses HA's WebRTC bridge)
 go2rtc_url: http://192.168.1.11:1984    # optional — only used when live_source: frigate; defaults to the frigate_url host on port 1984
 frigate_stream: main                    # optional — only used when live_source: frigate; go2rtc stream suffix, "main" or "sub"
 ```
@@ -46,7 +46,7 @@ A visual editor is also available (entity picker + form fields) when adding the 
 | `height` | no | `44` | Timeline strip height in pixels |
 | `default_zoom_hours` | no | `10` | Initial timeline zoom window, in hours (0.25–24) |
 | `auto_hide_seconds` | no | `0` | Auto-collapses the timeline after this many seconds of no interaction; `0` disables it |
-| `live_source` | no | `ha` | `ha` uses `ha-camera-stream` (recommended — same-origin, no mixed-content risk); `frigate` connects straight to Frigate's own go2rtc over WebRTC, bypassing HA's WebRTC bridge — opt-in, since it reintroduces the mixed-content failure mode `ha` avoids on https dashboards |
+| `live_source` | no | `ha` | `ha` uses `ha-camera-stream` (recommended — same-origin, no mixed-content risk); `frigate` connects straight to Frigate's own go2rtc over MSE (WebSocket-delivered fMP4 — more tolerant of tunneled paths like Tailscale than WebRTC's real-time UDP), bypassing HA's WebRTC bridge — opt-in, since it reintroduces the mixed-content failure mode `ha` avoids on https dashboards |
 | `go2rtc_url` | no | Frigate host on port `1984` | Only used when `live_source: frigate`; overrides go2rtc's address when it differs from the default |
 | `frigate_stream` | no | `main` | Only used when `live_source: frigate`; which go2rtc stream to use, `main` (full quality) or `sub` (lighter) |
 

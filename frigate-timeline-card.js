@@ -1083,13 +1083,14 @@ class FrigateTimelineCard extends HTMLElement {
    *     connection — works over https (Tailscale, Nabu Casa, any TLS
    *     reverse proxy) without any mixed-content issue.
    *   - `"frigate"`: connects straight to Frigate's own bundled go2rtc
-   *     instance over WebRTC, bypassing HA's `camera/webrtc/*` bridge
-   *     entirely — opt-in, since it reintroduces the exact mixed-content
-   *     failure mode `"ha"` was built to avoid (a raw `ws://<lan-ip>:1984`
-   *     connection is blocked outright when the dashboard itself loads
-   *     over https). Worth it for setups that are plain http/LAN-only,
-   *     where it avoids HA's WebRTC bridge as an extra hop/point of
-   *     failure. See `_showLiveViaGo2rtc()`.
+   *     instance over MSE (WebSocket-delivered fMP4, not WebRTC — see
+   *     `_showLiveViaGo2rtc()` for why), bypassing HA's `camera/webrtc/*`
+   *     bridge entirely — opt-in, since it reintroduces the exact
+   *     mixed-content failure mode `"ha"` was built to avoid (a raw
+   *     `ws://<lan-ip>:1984` connection is blocked outright when the
+   *     dashboard itself loads over https). Worth it for setups that are
+   *     plain http/LAN-only, where it avoids HA's WebRTC bridge as an
+   *     extra hop/point of failure.
    */
   async _showLive() {
     this._playingClip = null;
@@ -1149,52 +1150,31 @@ class FrigateTimelineCard extends HTMLElement {
     }
   }
 
-  /** Direct go2rtc WebRTC signaling — WS handshake at `/api/ws?src=`
-   * (go2rtc's actual WebSocket signaling endpoint; `/api/webrtc` is a
-   * separate HTTP-only WHIP/WHEP-style endpoint, not a WS upgrade target
-   * — using it here is exactly what "bad response from the server" on the
-   * WS connection meant). Message shapes (`webrtc/offer`/`answer`/
-   * `candidate`) are unchanged. A plain `<video>` this time (not a
-   * wrapper element), so play/pause and mute bind normally via
-   * `_bindVideoControls`. */
   /**
-   * Temporary diagnostic: logs the active ICE candidate pair (local/remote
-   * type — host/srflx/relay, and the actual addresses) plus inbound-video
-   * packet/loss counters to the console every 5s, for as long as this
-   * connection stays current (`token` guard, same pattern as everywhere
-   * else). Added specifically to chase a black-screen-with-heavy-packet-
-   * loss report on `live_source: frigate` that go2rtc's own embedded
-   * player doesn't reproduce on the identical network path — without this,
-   * there's no way to tell whether the two clients end up on different
-   * ICE candidate pairs (e.g. relayed vs. direct) or the same one.
+   * Direct go2rtc live via MSE (Media Source Extensions) over WebSocket —
+   * not WebRTC. This card originally used raw WebRTC here (matching the
+   * pre-ha-camera-stream implementation this option restores from git
+   * history), but real-world testing turned up heavy packet loss over a
+   * Tailscale path (confirmed via go2rtc's own `/api/streams` probe:
+   * thousands of dropped packets on the WebRTC consumer) producing a
+   * corrupted/black picture — while go2rtc's own embedded player, using
+   * MSE on the exact same network path, played back flawlessly. WebRTC's
+   * real-time UDP/RTP delivery is simply less tolerant of a tunneled path
+   * like Tailscale than MSE's WebSocket-delivered fMP4 segments (ordered,
+   * TCP-backed, no per-packet loss to speak of) — same trade-off video
+   * conferencing (WebRTC) vs. video streaming (progressive/segmented) has
+   * always had. MSE still fully satisfies the point of `live_source:
+   * frigate` — bypassing Home Assistant's own WebRTC bridge entirely,
+   * connecting straight to go2rtc — just via a different, more robust
+   * transport once it got there.
+   *
+   * Protocol (go2rtc's own, confirmed against its docs and reference JS
+   * client `www/video-rtc.js`): WS handshake at `/api/ws?src=<stream>`,
+   * client sends `{type:"mse", value:"<comma-separated codec list>"}`,
+   * server replies `{type:"mse", value:"<mime string incl. codecs>"}` —
+   * that becomes the `MediaSource.addSourceBuffer()` argument — and every
+   * subsequent binary WS message is one fMP4 segment to append.
    */
-  _debugWebRtcStats(pc, token) {
-    const interval = setInterval(async () => {
-      if (token !== this._liveToken || pc.connectionState === "closed") {
-        clearInterval(interval);
-        return;
-      }
-      try {
-        const stats = await pc.getStats();
-        let pairInfo = "";
-        let inbound = "";
-        stats.forEach((report) => {
-          if (report.type === "candidate-pair" && report.state === "succeeded" && report.nominated) {
-            const local = stats.get(report.localCandidateId);
-            const remote = stats.get(report.remoteCandidateId);
-            pairInfo = `pair: local=${local?.candidateType}/${local?.address}:${local?.port} remote=${remote?.candidateType}/${remote?.address}:${remote?.port} rtt=${report.currentRoundTripTime}`;
-          }
-          if (report.type === "inbound-rtp" && report.kind === "video") {
-            inbound = `video: received=${report.packetsReceived} lost=${report.packetsLost} jitter=${report.jitter} framesDecoded=${report.framesDecoded} framesDropped=${report.framesDropped}`;
-          }
-        });
-        console.info(`[frigate-timeline-card] go2rtc stats — ${pairInfo} | ${inbound}`);
-      } catch (err) {
-        console.warn("[frigate-timeline-card] getStats failed", err);
-      }
-    }, 5000);
-  }
-
   async _showLiveViaGo2rtc(token) {
     const video = document.createElement("video");
     video.autoplay = true;
@@ -1213,84 +1193,94 @@ class FrigateTimelineCard extends HTMLElement {
       this._liveBtnEl.classList.toggle("on-live", true);
     }
 
-    if (typeof RTCPeerConnection === "undefined") return;
+    if (!("MediaSource" in window)) {
+      this._showStageError(this._t("liveFrigateError"));
+      return;
+    }
     const go2rtcBase = this._go2rtcUrl();
     if (!go2rtcBase) return;
     const streamName = this._go2rtcStreamName();
+    const wsUrl = `${go2rtcBase.replace(/^http/, "ws")}/api/ws?src=${encodeURIComponent(streamName)}`;
+    if (typeof location !== "undefined" && location.protocol === "https:" && wsUrl.startsWith("ws://")) {
+      console.warn(
+        "[frigate-timeline-card] mixed content: page is https but go2rtc_url is http:// — this connection will be blocked"
+      );
+      this._showStageError(this._t("liveFrigateError"));
+      return;
+    }
 
     try {
-      const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-      this._rtcPeerConnection = pc;
-      pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "recvonly" });
-      pc.ontrack = (e) => {
-        if (e.streams?.[0]) video.srcObject = e.streams[0];
-      };
-
-      const wsUrl = `${go2rtcBase.replace(/^http/, "ws")}/api/ws?src=${encodeURIComponent(streamName)}`;
-      if (typeof location !== "undefined" && location.protocol === "https:" && wsUrl.startsWith("ws://")) {
-        throw new Error(
-          "Mixed content blocked: page is HTTPS but go2rtc is http://. Put go2rtc behind a TLS reverse proxy, or set go2rtc_url to an https:// address."
-        );
-      }
-
-      const ws = new WebSocket(wsUrl);
-      this._rtcWebSocket = ws;
-
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error(`go2rtc WS timeout after 10s (${wsUrl})`)), 10000);
-        ws.onopen = async () => {
-          try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            ws.send(JSON.stringify({ type: "webrtc/offer", value: pc.localDescription.sdp }));
-          } catch (err) {
-            reject(err);
-          }
-        };
-        ws.onmessage = async (evt) => {
-          try {
-            const msg = JSON.parse(evt.data);
-            if (msg.type === "webrtc/answer") {
-              await pc.setRemoteDescription({ type: "answer", sdp: msg.value });
-              clearTimeout(timeout);
-              resolve();
-            } else if (msg.type === "webrtc/candidate") {
-              pc.addIceCandidate({ candidate: msg.value, sdpMid: "0" }).catch(() => {});
-            } else if (msg.type === "error") {
-              clearTimeout(timeout);
-              reject(new Error(`go2rtc reported: ${msg.value}`));
-            }
-          } catch (err) {
-            reject(err);
-          }
-        };
-        ws.onerror = () => {
-          clearTimeout(timeout);
-          reject(new Error("go2rtc WS error"));
-        };
-        ws.onclose = (e) => {
-          if (e.code !== 1000) {
-            clearTimeout(timeout);
-            reject(new Error(`go2rtc WS closed (code ${e.code})`));
-          }
-        };
-      });
-      if (token !== this._liveToken) return;
-
-      pc.onicecandidate = (e) => {
-        if (e.candidate && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "webrtc/candidate", value: e.candidate.candidate }));
+      const ms = new MediaSource();
+      video.src = URL.createObjectURL(ms);
+      let sourceBuffer = null;
+      const queue = [];
+      const pump = () => {
+        if (sourceBuffer && !sourceBuffer.updating && queue.length) {
+          sourceBuffer.appendBuffer(queue.shift());
         }
       };
-      this._debugWebRtcStats(pc, token);
+
+      const ws = new WebSocket(wsUrl);
+      ws.binaryType = "arraybuffer";
+      this._rtcWebSocket = ws;
+
+      ws.onopen = () => {
+        if (token !== this._liveToken) return;
+        // Broad, go2rtc-documented default codec list — the server picks
+        // what it can actually offer for this camera (H264 baseline is
+        // universally supported) and tells us the exact mime to use.
+        ws.send(
+          JSON.stringify({
+            type: "mse",
+            value: "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0,mp4a.40.2,mp4a.40.5,flac,opus",
+          })
+        );
+      };
+      ws.onmessage = (evt) => {
+        if (token !== this._liveToken) return;
+        if (typeof evt.data === "string") {
+          try {
+            const msg = JSON.parse(evt.data);
+            if (msg.type === "mse" && !sourceBuffer) {
+              const create = () => {
+                sourceBuffer = ms.addSourceBuffer(msg.value);
+                sourceBuffer.mode = "segments";
+                sourceBuffer.addEventListener("updateend", pump);
+              };
+              if (ms.readyState === "open") create();
+              else ms.addEventListener("sourceopen", create, { once: true });
+            } else if (msg.type === "error") {
+              console.warn("[frigate-timeline-card] go2rtc MSE error", msg.value);
+              this._showStageError(this._t("liveFrigateError"));
+            }
+          } catch (_) {
+            /* ignore malformed control message */
+          }
+          return;
+        }
+        // Binary fMP4 segment.
+        if (!sourceBuffer || sourceBuffer.updating || queue.length) {
+          queue.push(evt.data);
+        } else {
+          try {
+            sourceBuffer.appendBuffer(evt.data);
+          } catch (err) {
+            console.warn("[frigate-timeline-card] appendBuffer failed", err);
+          }
+        }
+      };
+      ws.onerror = () => {
+        if (token === this._liveToken) console.warn("[frigate-timeline-card] go2rtc MSE WS error");
+      };
+      ws.onclose = (e) => {
+        if (e.code !== 1000 && token === this._liveToken) {
+          console.warn(`[frigate-timeline-card] go2rtc MSE WS closed unexpectedly (code ${e.code})`);
+          this._showStageError(this._t("liveFrigateError"));
+        }
+      };
     } catch (err) {
       console.warn("[frigate-timeline-card] go2rtc live view failed", err);
-      if (token === this._liveToken) {
-        this._showStageError(
-          this._t("liveFrigateError")
-        );
-      }
+      if (token === this._liveToken) this._showStageError(this._t("liveFrigateError"));
     }
   }
 
