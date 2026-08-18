@@ -1072,6 +1072,60 @@ class FrigateTimelineCard extends HTMLElement {
     video.src = canPlayNativeHls ? hlsUrl : mp4Url;
     this._stageEl.appendChild(video);
     this._bindVideoControls(video);
+
+    // Best-effort correction, fired in parallel — never awaited before
+    // starting playback above, since delaying video creation would push it
+    // outside the synchronous click handler and risk losing the user-
+    // gesture autoplay-with-sound allowance.
+    this._correctClipStartSec(camId, base, startSec);
+  }
+
+  /**
+   * Frigate stores recordings in ~10s segments, split only on keyframes —
+   * it can't start a VOD/clip response at the exact requested `start`
+   * second, only at the nearest segment boundary. Our pill time assumes
+   * `video.currentTime === 0` lines up with the requested `startSec`
+   * exactly, which is off by however far that boundary actually was —
+   * visible as a mismatch against a camera's own burned-in timestamp
+   * overlay. Fetches the real segment list around the requested time and
+   * corrects `_clipStartSec` to the segment's true `start_time` once known.
+   *
+   * Best-effort: many self-hosted Frigate instances don't send
+   * `Access-Control-Allow-Origin` (the same CORS gap that broke direct clip
+   * playback before the native-`<video>` fix), so this REST call can fail —
+   * caught and silently ignored, leaving the original requested-time
+   * approximation in place.
+   */
+  async _correctClipStartSec(camId, base, requestedStartSec) {
+    const clipToken = this._playingClip;
+    try {
+      const after = requestedStartSec - 1;
+      const before = requestedStartSec + 11; // ~one segment of margin either side
+      const res = await fetch(`${base}/${camId}/recordings?after=${after}&before=${before}`);
+      if (!res.ok) return;
+      const segments = await res.json();
+      if (this._playingClip !== clipToken) return; // superseded by a newer seek/live
+      if (!Array.isArray(segments) || !segments.length) return;
+      let best = null;
+      let bestDist = Infinity;
+      for (const seg of segments) {
+        const segStart = Number(seg.start_time);
+        const segEnd = Number(seg.end_time);
+        if (!Number.isFinite(segStart)) continue;
+        if (Number.isFinite(segEnd) && requestedStartSec >= segStart && requestedStartSec <= segEnd) {
+          best = segStart;
+          break;
+        }
+        const dist = Math.abs(segStart - requestedStartSec);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = segStart;
+        }
+      }
+      if (best != null) this._clipStartSec = best;
+    } catch (err) {
+      console.warn("[frigate-timeline-card] recordings lookup unavailable (CORS or unreachable) — pill time is an approximation", err);
+    }
   }
 
   _seekTo(frac) {
