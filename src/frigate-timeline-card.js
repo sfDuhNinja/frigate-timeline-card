@@ -85,6 +85,10 @@ const ICON_VOLUME_OFF =
   '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.42.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.8L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
 const ICON_FULLSCREEN =
   '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
+const ICON_TIMELINE_HIDE =
+  '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3 11h2v2H3zm4 0h2v2H7zm4 0h2v2h-2zm4 0h2v2h-2zm4 0h2v2h-2zM12 3l-4 4h8z"/></svg>';
+const ICON_TIMELINE_SHOW =
+  '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3 11h2v2H3zm4 0h2v2H7zm4 0h2v2h-2zm4 0h2v2h-2zm4 0h2v2h-2zM12 21l4-4H8z"/></svg>';
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -335,11 +339,16 @@ class FrigateTimelineCard extends HTMLElement {
         }
         frigate-timeline-card .ftc-now-pill.clip { background: #2f8fc0; }
         frigate-timeline-card .ftc-now-line {
-          position: absolute; top: -8px; bottom: 0; width: 0;
-          border-left: 1px dashed rgba(255, 255, 255, 0.5);
-          transform: translateX(-50%); pointer-events: none; z-index: 3;
+          position: absolute; top: -8px; bottom: 0; width: 20px;
+          transform: translateX(-50%); pointer-events: auto; z-index: 3;
+          cursor: ew-resize; touch-action: none;
         }
-        frigate-timeline-card .ftc-now-line.clip { border-left-color: rgba(79, 195, 247, 0.7); }
+        frigate-timeline-card .ftc-now-line::after {
+          content: ""; position: absolute; top: 0; bottom: 0; left: 50%;
+          border-left: 1px dashed rgba(255, 255, 255, 0.5); transform: translateX(-50%);
+        }
+        frigate-timeline-card .ftc-now-line.clip::after { border-left-color: rgba(79, 195, 247, 0.7); }
+        frigate-timeline-card .ftc-now-line.scrubbing::after { border-left-color: #4fc3f7; border-left-width: 2px; }
         frigate-timeline-card .ftc-scrub {
           position: absolute; top: 0; bottom: 0; width: 2px; background: #4fc3f7;
           box-shadow: 0 0 6px rgba(79, 195, 247, 0.9); pointer-events: none;
@@ -357,6 +366,7 @@ class FrigateTimelineCard extends HTMLElement {
       </style>
     `;
     this._stageEl = this.querySelector(".ftc-stage");
+    this._timelineEl = this.querySelector(".ftc-timeline");
     this._trackEl = this.querySelector(".ftc-track");
     this._ticksEl = this.querySelector(".ftc-ticks");
     this._dayLabelEl = this.querySelector(".ftc-daylabel");
@@ -365,6 +375,7 @@ class FrigateTimelineCard extends HTMLElement {
     this._trackEl.style.height = `${this._config.height}px`;
     this._buildControlBar();
     this._wireTrackInteraction();
+    this._wireNowLineScrub();
     this._nextDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="1"]');
     this.querySelectorAll(".ftc-navbtn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -437,6 +448,82 @@ class FrigateTimelineCard extends HTMLElement {
     if (!this._zoomLabelEl) return;
     const h = this._windowHours || 24;
     this._zoomLabelEl.textContent = h >= 24 ? "24h" : h >= 1 ? `${h % 1 === 0 ? h : h.toFixed(1)}h` : `${Math.round(h * 60)}m`;
+  }
+
+  /** Press-and-hold the dashed "now" guideline to scrub — a dedicated grab
+   * handle, distinct from tapping elsewhere on the track (single seek) or
+   * dragging the track itself (pans the view once zoomed in). Lives on a
+   * separate DOM node from `_trackEl` (a sibling in `.ftc-trackwrap`, not a
+   * child), so its listeners never conflict with `_wireTrackInteraction`'s.
+   *
+   * Continuously previews the dragged position (pill + line follow the
+   * pointer every frame), but throttles the actual `_playAt()` reload —
+   * every pixel would tear down and recreate the whole video/hls
+   * attachment, which is far too expensive to do per pointermove. */
+  _wireNowLineScrub() {
+    if (!this._nowLineEl) return;
+    const SCRUB_THROTTLE_MS = 350;
+    let dragging = false;
+    let throttleTimer = null;
+    let lastTs = null;
+
+    const fracFromEvent = (e) => {
+      const rect = this._trackEl.getBoundingClientRect();
+      if (!rect.width) return null;
+      const x = e.clientX ?? e.touches?.[0]?.clientX;
+      if (x == null) return null;
+      return Math.min(1, Math.max(0, (x - rect.left) / rect.width));
+    };
+
+    const previewAt = (frac) => {
+      const win = this._currentWindow();
+      const ts = win.start + frac * (win.end - win.start);
+      const pct = frac * 100;
+      this._nowLineEl.style.display = "";
+      this._nowPillEl.style.display = "";
+      this._nowLineEl.style.left = `${pct}%`;
+      this._nowPillEl.style.left = `${pct}%`;
+      this._nowPillEl.textContent = this._formatClock(new Date(ts));
+      return ts;
+    };
+
+    const scheduleSeek = (ts) => {
+      lastTs = ts;
+      if (throttleTimer) return;
+      throttleTimer = setTimeout(() => {
+        throttleTimer = null;
+        if (lastTs != null) this._playAt(lastTs);
+      }, SCRUB_THROTTLE_MS);
+    };
+
+    this._nowLineEl.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      dragging = true;
+      this._scrubbing = true;
+      this._nowLineEl.classList.add("scrubbing");
+      const frac = fracFromEvent(e);
+      if (frac != null) scheduleSeek(previewAt(frac));
+    });
+    window.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const frac = fracFromEvent(e);
+      if (frac == null) return;
+      scheduleSeek(previewAt(frac));
+    });
+    const stop = () => {
+      if (!dragging) return;
+      dragging = false;
+      this._scrubbing = false;
+      this._nowLineEl.classList.remove("scrubbing");
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = null;
+      }
+      if (lastTs != null) this._playAt(lastTs);
+    };
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
   }
 
   _wireTrackInteraction() {
@@ -739,7 +826,18 @@ class FrigateTimelineCard extends HTMLElement {
     liveBtn.title = "Revino la live";
     liveBtn.addEventListener("click", () => this._showLive());
 
-    bar.append(playBtn, muteBtn, fsBtn, liveBtn);
+    const timelineToggleBtn = document.createElement("button");
+    timelineToggleBtn.className = "ftc-ctlbtn";
+    timelineToggleBtn.innerHTML = ICON_TIMELINE_HIDE;
+    timelineToggleBtn.title = "Ascunde/afișează timeline";
+    timelineToggleBtn.addEventListener("click", () => {
+      if (!this._timelineEl) return;
+      const hidden = this._timelineEl.style.display === "none";
+      this._timelineEl.style.display = hidden ? "" : "none";
+      timelineToggleBtn.innerHTML = hidden ? ICON_TIMELINE_HIDE : ICON_TIMELINE_SHOW;
+    });
+
+    bar.append(playBtn, muteBtn, fsBtn, timelineToggleBtn, liveBtn);
     this._playBtnEl = playBtn;
     this._muteBtnEl = muteBtn;
     this._liveBtnEl = liveBtn;
@@ -766,6 +864,17 @@ class FrigateTimelineCard extends HTMLElement {
   async _showLive() {
     this._playingClip = null;
     this._pillMode = "live";
+    // Returning to live should mean returning to "now" on the timeline too
+    // — if the user was browsing a past day, jump the strip back to today
+    // rather than leaving it stranded on a day with no live position to
+    // show. Only resets when actually on a different day, so tapping Live
+    // while already on today doesn't disturb the current zoom/pan.
+    if (this._dayKey !== todayKey()) {
+      this._dayKey = todayKey();
+      this._resetZoom();
+      this._updateDayNavState();
+      this._ensureData();
+    }
     const token = (this._liveToken = (this._liveToken || 0) + 1);
     this._teardownWebRtc();
     this._teardownHls();
@@ -1022,7 +1131,7 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   _updateNowPill() {
-    if (!this._nowPillEl) return;
+    if (!this._nowPillEl || this._scrubbing) return; // don't fight the drag preview
     const win = this._currentWindow();
     const isClip = this._pillMode === "clip";
     const now = isClip ? this._clipCurrentMs ?? Date.now() : Date.now();
