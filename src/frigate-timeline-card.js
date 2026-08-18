@@ -450,6 +450,26 @@ class FrigateTimelineCard extends HTMLElement {
     this._zoomLabelEl.textContent = h >= 24 ? "24h" : h >= 1 ? `${h % 1 === 0 ? h : h.toFixed(1)}h` : `${Math.round(h * 60)}m`;
   }
 
+  /** Snaps a raw timestamp to the closest event's start time, if any events
+   * are loaded — used by the now-line scrub gesture so dragging lands on
+   * something that actually happened instead of an arbitrary empty moment.
+   * Falls back to the raw timestamp when there are no events at all. */
+  _nearestEventStartMs(ts) {
+    if (!this._events?.length) return ts;
+    let best = null;
+    let bestDist = Infinity;
+    for (const ev of this._events) {
+      const start = Number(ev.start_time) * 1000;
+      if (!Number.isFinite(start)) continue;
+      const dist = Math.abs(start - ts);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = start;
+      }
+    }
+    return best != null ? best : ts;
+  }
+
   /** Press-and-hold the dashed "now" guideline to scrub — a dedicated grab
    * handle, distinct from tapping elsewhere on the track (single seek) or
    * dragging the track itself (pans the view once zoomed in). Lives on a
@@ -477,8 +497,12 @@ class FrigateTimelineCard extends HTMLElement {
 
     const previewAt = (frac) => {
       const win = this._currentWindow();
-      const ts = win.start + frac * (win.end - win.start);
-      const pct = frac * 100;
+      const raw = win.start + frac * (win.end - win.start);
+      // Scrubbing snaps to the nearest event's start — landing on an exact
+      // arbitrary drag position is far less useful than landing where
+      // something actually happened, since most of the timeline is empty.
+      const ts = this._nearestEventStartMs(raw);
+      const pct = Math.min(100, Math.max(0, ((ts - win.start) / (win.end - win.start)) * 100));
       this._nowLineEl.style.display = "";
       this._nowPillEl.style.display = "";
       this._nowLineEl.style.left = `${pct}%`;
