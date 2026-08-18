@@ -64,11 +64,27 @@ const ALERT_SCORE_THRESHOLD = 0.7;
 function approximateSeverity(ev) {
   const label = String(ev?.label ?? "").toLowerCase();
   const score = Number(ev?.top_score ?? ev?.score ?? 0);
+  // Person events always render red/alert, matching Frigate's own timeline
+  // — regardless of confidence score or verified status, unlike other
+  // labels (car, etc.) which still need a verified/high-confidence hit.
+  if (label === "person" || label === "person-verified") return "alert";
   if (ALERT_LABEL_RE.test(label) && (label.endsWith("-verified") || score >= ALERT_SCORE_THRESHOLD)) {
     return "alert";
   }
   return "detection";
 }
+
+// Minimal inline icon set (Material Design icon paths) — no emoji anywhere
+// in the control bar, per design requirement. `currentColor` fill means
+// each button's own text color (and CSS var overrides) apply automatically.
+const ICON_PLAY = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+const ICON_PAUSE = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>';
+const ICON_VOLUME_UP =
+  '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+const ICON_VOLUME_OFF =
+  '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.42.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.8L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
+const ICON_FULLSCREEN =
+  '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -104,12 +120,18 @@ class FrigateTimelineCard extends HTMLElement {
     if (!config.camera_entity) {
       throw new Error("frigate-timeline-card: 'camera_entity' is required (for live view via ha-camera-stream)");
     }
-    this._config = { height: 44, frigate_instance_id: "frigate", ...config };
+    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, ...config };
     this._dayKey = todayKey();
     this._segments = [];
     this._events = [];
     this._fetchKey = null;
+    this._resetZoom();
     if (!this._built) this._build();
+  }
+
+  _defaultZoomHours() {
+    const h = Number(this._config?.default_zoom_hours);
+    return Number.isFinite(h) && h > 0 ? Math.min(24, h) : 10;
   }
 
   set hass(hass) {
@@ -205,16 +227,13 @@ class FrigateTimelineCard extends HTMLElement {
     this.innerHTML = `
       <ha-card>
         <div class="ftc-stage"></div>
-        <div class="ftc-controlbar"></div>
-        <div class="ftc-daynav">
-          <button class="ftc-navbtn" data-dir="-1" title="Previous day">‹</button>
-          <span class="ftc-daylabel"></span>
-          <button class="ftc-navbtn" data-dir="1" title="Next day">›</button>
-          <span class="ftc-navspacer"></span>
-          <button class="ftc-zoombtn" data-zoom="out" title="Zoom out">−</button>
-          <span class="ftc-zoomlabel"></span>
-          <button class="ftc-zoombtn" data-zoom="in" title="Zoom in">+</button>
-          <button class="ftc-zoombtn" data-zoom="reset" title="Reset zoom">⤢</button>
+        <div class="ftc-toolbar">
+          <div class="ftc-daynav">
+            <button class="ftc-navbtn" data-dir="-1" title="Previous day">‹</button>
+            <span class="ftc-daylabel"></span>
+            <button class="ftc-navbtn" data-dir="1" title="Next day">›</button>
+          </div>
+          <div class="ftc-controlbar"></div>
         </div>
         <div class="ftc-timeline">
           <div class="ftc-trackwrap">
@@ -234,37 +253,37 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-stage video {
           width: 100%; height: 100%; display: block; object-fit: contain; background: #000;
         }
-        frigate-timeline-card .ftc-controlbar {
-          display: flex; align-items: center; gap: 4px; padding: 6px 8px;
-          background: var(--card-background-color, #1c1c1c);
+        frigate-timeline-card .ftc-toolbar {
+          display: flex; align-items: center; justify-content: space-between; gap: 8px;
+          padding: 6px 8px; background: var(--card-background-color, #1c1c1c);
           border-bottom: 1px solid rgba(127, 127, 127, 0.15);
         }
+        frigate-timeline-card .ftc-controlbar { display: flex; align-items: center; gap: 2px; }
         frigate-timeline-card .ftc-ctlbtn {
+          display: flex; align-items: center; justify-content: center;
           background: none; border: none; color: var(--primary-text-color, #fff);
-          font-size: 16px; line-height: 1; cursor: pointer; padding: 6px 10px; border-radius: 6px;
+          line-height: 1; cursor: pointer; padding: 6px 8px; border-radius: 6px;
         }
         frigate-timeline-card .ftc-ctlbtn:hover { background: rgba(127, 127, 127, 0.15); }
-        frigate-timeline-card .ftc-ctl-spacer { flex: 1; }
         frigate-timeline-card .ftc-live-btn {
-          font-size: 12px; font-weight: 700; letter-spacing: 0.02em; opacity: 0.4;
+          display: flex; align-items: center; gap: 5px;
+          font-size: 11px; font-weight: 700; letter-spacing: 0.03em; opacity: 0.4;
+          text-transform: uppercase; padding: 6px 10px;
         }
         frigate-timeline-card .ftc-live-btn.active { opacity: 1; }
-        frigate-timeline-card .ftc-daynav {
-          display: flex; align-items: center; justify-content: center; gap: 6px;
-          padding: 6px 10px 0; font-size: 13px; color: var(--primary-text-color, #fff);
+        frigate-timeline-card .ftc-live-dot {
+          width: 8px; height: 8px; border-radius: 50%; background: #ef4444; flex: none;
         }
-        frigate-timeline-card .ftc-daylabel { padding: 0 4px; }
-        frigate-timeline-card .ftc-navspacer { width: 12px; }
-        frigate-timeline-card .ftc-navbtn, frigate-timeline-card .ftc-zoombtn {
+        frigate-timeline-card .ftc-daynav {
+          display: flex; align-items: center; gap: 6px;
+          font-size: 13px; color: var(--primary-text-color, #fff);
+        }
+        frigate-timeline-card .ftc-daylabel { padding: 0 4px; min-width: 60px; text-align: center; }
+        frigate-timeline-card .ftc-navbtn {
           background: none; border: none; color: inherit; font-size: 16px; line-height: 1;
           cursor: pointer; padding: 3px 9px; border-radius: 6px;
         }
-        frigate-timeline-card .ftc-navbtn:hover, frigate-timeline-card .ftc-zoombtn:hover {
-          background: rgba(127, 127, 127, 0.15);
-        }
-        frigate-timeline-card .ftc-zoomlabel {
-          font-size: 11px; color: var(--secondary-text-color, #999); min-width: 30px; text-align: center;
-        }
+        frigate-timeline-card .ftc-navbtn:hover { background: rgba(127, 127, 127, 0.15); }
         frigate-timeline-card .ftc-timeline { padding: 22px 10px 8px; }
         frigate-timeline-card .ftc-trackwrap { position: relative; }
         frigate-timeline-card .ftc-track {
@@ -319,7 +338,6 @@ class FrigateTimelineCard extends HTMLElement {
     this._dayLabelEl = this.querySelector(".ftc-daylabel");
     this._nowPillEl = this.querySelector(".ftc-now-pill");
     this._nowLineEl = this.querySelector(".ftc-now-line");
-    this._zoomLabelEl = this.querySelector(".ftc-zoomlabel");
     this._trackEl.style.height = `${this._config.height}px`;
     this._buildControlBar();
     this._wireTrackInteraction();
@@ -330,19 +348,6 @@ class FrigateTimelineCard extends HTMLElement {
         this._ensureData();
       });
     });
-    this.querySelectorAll(".ftc-zoombtn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const mode = btn.dataset.zoom;
-        if (mode === "reset") {
-          this._resetZoom();
-          return;
-        }
-        const win = this._currentWindow();
-        const center = win.start + (win.end - win.start) / 2;
-        this._applyZoom(this._windowHours * (mode === "in" ? 1 / 1.6 : 1.6), center);
-      });
-    });
-    this._updateZoomLabel();
     this._showLive();
   }
 
@@ -378,9 +383,14 @@ class FrigateTimelineCard extends HTMLElement {
     this._renderTimeline();
   }
 
+  /** Resets to the configured default zoom window (10h unless overridden),
+   * centered on "now" when viewing today so the most recent activity is
+   * visible by default, or on the tail end of the day when browsing a past
+   * day. Called on initial load and whenever the viewed day changes. */
   _resetZoom() {
-    this._windowHours = 24;
-    this._centerMs = null;
+    this._windowHours = this._defaultZoomHours();
+    const day = dayWindow(this._dayKey);
+    this._centerMs = Math.min(Date.now(), day.end);
     this._updateZoomLabel();
     this._renderTimeline();
   }
@@ -568,10 +578,10 @@ class FrigateTimelineCard extends HTMLElement {
       else video.pause();
     });
     const syncPlay = () => {
-      if (this._playBtnEl) this._playBtnEl.textContent = video.paused ? "▶" : "⏸";
+      if (this._playBtnEl) this._playBtnEl.innerHTML = video.paused ? ICON_PLAY : ICON_PAUSE;
     };
     const syncMute = () => {
-      if (this._muteBtnEl) this._muteBtnEl.textContent = video.muted ? "🔇" : "🔊";
+      if (this._muteBtnEl) this._muteBtnEl.innerHTML = video.muted ? ICON_VOLUME_OFF : ICON_VOLUME_UP;
     };
     video.addEventListener("play", syncPlay);
     video.addEventListener("pause", syncPlay);
@@ -588,7 +598,7 @@ class FrigateTimelineCard extends HTMLElement {
     const bar = this.querySelector(".ftc-controlbar");
     const playBtn = document.createElement("button");
     playBtn.className = "ftc-ctlbtn";
-    playBtn.textContent = "▶";
+    playBtn.innerHTML = ICON_PLAY;
     playBtn.title = "Play/Pause";
     playBtn.addEventListener("click", () => {
       if (!this._videoEl) return;
@@ -598,7 +608,7 @@ class FrigateTimelineCard extends HTMLElement {
 
     const muteBtn = document.createElement("button");
     muteBtn.className = "ftc-ctlbtn";
-    muteBtn.textContent = "🔊";
+    muteBtn.innerHTML = ICON_VOLUME_OFF;
     muteBtn.title = "Mute/Unmute";
     muteBtn.addEventListener("click", () => {
       // Clip mode: this._videoEl is a plain <video>. Live mode: it's null
@@ -607,12 +617,12 @@ class FrigateTimelineCard extends HTMLElement {
       const target = this._videoEl || this._streamEl;
       if (!target) return;
       target.muted = !target.muted;
-      muteBtn.textContent = target.muted ? "🔇" : "🔊";
+      muteBtn.innerHTML = target.muted ? ICON_VOLUME_OFF : ICON_VOLUME_UP;
     });
 
     const fsBtn = document.createElement("button");
     fsBtn.className = "ftc-ctlbtn";
-    fsBtn.textContent = "⛶";
+    fsBtn.innerHTML = ICON_FULLSCREEN;
     fsBtn.title = "Fullscreen";
     fsBtn.addEventListener("click", () => {
       const doc = document;
@@ -621,22 +631,31 @@ class FrigateTimelineCard extends HTMLElement {
         (doc.exitFullscreen || doc.webkitExitFullscreen)?.call(doc);
         return;
       }
-      const el = this._stageEl;
-      if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
-      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-      else if (this._videoEl?.webkitEnterFullscreen) this._videoEl.webkitEnterFullscreen(); // iPhone Safari
+      // Prefer requesting fullscreen on the actual playing <video> (clip
+      // mode) rather than the stage container — far more reliably supported
+      // cross-browser, especially on WebKit, than fullscreening an
+      // arbitrary <div> that (in live mode) wraps another custom element's
+      // own shadow-rooted <video>. The stage div is still the fallback for
+      // live, where no plain <video> is reachable from here at all.
+      const target = this._videoEl || this._stageEl;
+      if (target?.requestFullscreen) {
+        target.requestFullscreen().catch((err) => console.warn("[frigate-timeline-card] requestFullscreen failed", err));
+      } else if (target?.webkitRequestFullscreen) {
+        target.webkitRequestFullscreen();
+      } else if (this._videoEl?.webkitEnterFullscreen) {
+        this._videoEl.webkitEnterFullscreen(); // iPhone Safari
+      } else {
+        console.warn("[frigate-timeline-card] Fullscreen API unavailable for this element");
+      }
     });
-
-    const spacer = document.createElement("span");
-    spacer.className = "ftc-ctl-spacer";
 
     const liveBtn = document.createElement("button");
     liveBtn.className = "ftc-ctlbtn ftc-live-btn";
-    liveBtn.textContent = "🔴 Live";
+    liveBtn.innerHTML = '<span class="ftc-live-dot"></span>Live';
     liveBtn.title = "Revino la live";
     liveBtn.addEventListener("click", () => this._showLive());
 
-    bar.append(playBtn, muteBtn, fsBtn, spacer, liveBtn);
+    bar.append(playBtn, muteBtn, fsBtn, liveBtn);
     this._playBtnEl = playBtn;
     this._muteBtnEl = muteBtn;
     this._liveBtnEl = liveBtn;
@@ -687,7 +706,7 @@ class FrigateTimelineCard extends HTMLElement {
     // meaningful action anyway, so the play button is simply inert here;
     // mute toggles its public `.muted` property directly.
     this._videoEl = null;
-    if (this._muteBtnEl) this._muteBtnEl.textContent = player.muted ? "🔇" : "🔊";
+    if (this._muteBtnEl) this._muteBtnEl.innerHTML = player.muted ? ICON_VOLUME_OFF : ICON_VOLUME_UP;
     if (this._liveBtnEl) this._liveBtnEl.classList.toggle("active", false);
   }
 
@@ -769,7 +788,7 @@ class FrigateTimelineCard extends HTMLElement {
 
     const video = document.createElement("video");
     video.autoplay = true;
-    video.muted = false;
+    video.muted = true; // starts muted, same as live — consistent across play/live/timeline; mute button toggles it
     video.playsInline = true;
     video.controls = false; // controls live in the shared bar below — never native
     video.addEventListener("timeupdate", () => {
@@ -991,7 +1010,7 @@ class FrigateTimelineCard extends HTMLElement {
 
 class FrigateTimelineCardEditor extends HTMLElement {
   setConfig(config) {
-    this._config = { height: 44, frigate_instance_id: "frigate", ...config };
+    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, ...config };
     if (!this._built) this._build();
     this._sync();
   }
@@ -1014,7 +1033,10 @@ class FrigateTimelineCardEditor extends HTMLElement {
           <ha-textfield id="ftc-ed-camera" label="Cameră în Frigate (ex: spate)" style="width:100%"></ha-textfield>
         </div>
         <ha-textfield id="ftc-ed-instance" label="Frigate instance id (implicit: frigate)" style="width:100%"></ha-textfield>
-        <ha-textfield id="ftc-ed-height" label="Înălțime timeline (px)" type="number" style="width:100%"></ha-textfield>
+        <div style="display:flex;gap:8px;">
+          <ha-textfield id="ftc-ed-height" label="Înălțime timeline (px)" type="number" style="flex:1"></ha-textfield>
+          <ha-textfield id="ftc-ed-zoom" label="Zoom implicit (ore)" type="number" style="flex:1"></ha-textfield>
+        </div>
       </div>
     `;
     const entityRow = this.querySelector("#ftc-ed-entity");
@@ -1040,6 +1062,9 @@ class FrigateTimelineCardEditor extends HTMLElement {
     this.querySelector("#ftc-ed-camera").addEventListener("input", (e) => this._update("frigate_camera", e.target.value));
     this.querySelector("#ftc-ed-instance").addEventListener("input", (e) => this._update("frigate_instance_id", e.target.value));
     this.querySelector("#ftc-ed-height").addEventListener("input", (e) => this._update("height", Number(e.target.value) || 44));
+    this.querySelector("#ftc-ed-zoom").addEventListener("input", (e) =>
+      this._update("default_zoom_hours", Math.min(24, Math.max(0.25, Number(e.target.value) || 10)))
+    );
 
     this._fetchFrigateCameraList();
   }
@@ -1108,6 +1133,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
     if (!this._frigateCameraNames?.length) set("#ftc-ed-camera", this._config.frigate_camera);
     set("#ftc-ed-instance", this._config.frigate_instance_id);
     set("#ftc-ed-height", this._config.height ?? 44);
+    set("#ftc-ed-zoom", this._config.default_zoom_hours ?? 10);
   }
 
   _update(key, value) {
