@@ -1803,7 +1803,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
    * Silently keeps the text field as a fallback if the fetch fails
    * (e.g. CORS). */
   async _fetchFrigateCameraList() {
-    const url = this._config.frigate_url;
+    const url = this._config?.frigate_url;
     if (!url) return;
     const base = String(url).replace(/\/+$/, "");
     const token = (this._camFetchToken = (this._camFetchToken || 0) + 1);
