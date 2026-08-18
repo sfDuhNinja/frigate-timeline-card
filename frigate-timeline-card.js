@@ -1157,6 +1157,44 @@ class FrigateTimelineCard extends HTMLElement {
    * `candidate`) are unchanged. A plain `<video>` this time (not a
    * wrapper element), so play/pause and mute bind normally via
    * `_bindVideoControls`. */
+  /**
+   * Temporary diagnostic: logs the active ICE candidate pair (local/remote
+   * type — host/srflx/relay, and the actual addresses) plus inbound-video
+   * packet/loss counters to the console every 5s, for as long as this
+   * connection stays current (`token` guard, same pattern as everywhere
+   * else). Added specifically to chase a black-screen-with-heavy-packet-
+   * loss report on `live_source: frigate` that go2rtc's own embedded
+   * player doesn't reproduce on the identical network path — without this,
+   * there's no way to tell whether the two clients end up on different
+   * ICE candidate pairs (e.g. relayed vs. direct) or the same one.
+   */
+  _debugWebRtcStats(pc, token) {
+    const interval = setInterval(async () => {
+      if (token !== this._liveToken || pc.connectionState === "closed") {
+        clearInterval(interval);
+        return;
+      }
+      try {
+        const stats = await pc.getStats();
+        let pairInfo = "";
+        let inbound = "";
+        stats.forEach((report) => {
+          if (report.type === "candidate-pair" && report.state === "succeeded" && report.nominated) {
+            const local = stats.get(report.localCandidateId);
+            const remote = stats.get(report.remoteCandidateId);
+            pairInfo = `pair: local=${local?.candidateType}/${local?.address}:${local?.port} remote=${remote?.candidateType}/${remote?.address}:${remote?.port} rtt=${report.currentRoundTripTime}`;
+          }
+          if (report.type === "inbound-rtp" && report.kind === "video") {
+            inbound = `video: received=${report.packetsReceived} lost=${report.packetsLost} jitter=${report.jitter} framesDecoded=${report.framesDecoded} framesDropped=${report.framesDropped}`;
+          }
+        });
+        console.info(`[frigate-timeline-card] go2rtc stats — ${pairInfo} | ${inbound}`);
+      } catch (err) {
+        console.warn("[frigate-timeline-card] getStats failed", err);
+      }
+    }, 5000);
+  }
+
   async _showLiveViaGo2rtc(token) {
     const video = document.createElement("video");
     video.autoplay = true;
@@ -1245,6 +1283,7 @@ class FrigateTimelineCard extends HTMLElement {
           ws.send(JSON.stringify({ type: "webrtc/candidate", value: e.candidate.candidate }));
         }
       };
+      this._debugWebRtcStats(pc, token);
     } catch (err) {
       console.warn("[frigate-timeline-card] go2rtc live view failed", err);
       if (token === this._liveToken) {
