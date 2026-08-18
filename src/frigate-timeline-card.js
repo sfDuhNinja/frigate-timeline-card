@@ -2,23 +2,25 @@
  * frigate-timeline-card
  *
  * Minimal Home Assistant Lovelace card: live camera view plus a horizontal
- * Frigate-style event timeline below it (red = alert, orange = detection,
- * dim = no reviewed activity), matching Frigate's own colors. Drag/click the
- * timeline to play the nearest recorded clip inline; a "LIVE" button returns
- * to the live stream.
+ * Frigate-style event timeline below it (gold = detection, red = alert,
+ * live-updating "now" pill), matching Frigate's own colors. Click/drag the
+ * timeline to play the nearest ~1min of recorded footage inline; a "Live"
+ * button returns to the live stream.
  *
- * Live view is WebRTC, driven directly via HA's official `camera/webrtc/*`
- * websocket commands (the same protocol `ha-web-rtc-player` uses internally)
- * called straight off `hass.connection`/`hass.callWS` — no `<ha-camera-stream>`
- * / `<ha-web-rtc-player>` element involved. Those components consume Lit
- * context (`@consume` on api/connection) that doesn't resolve reliably when
- * the element is instantiated by outside code rather than mounted by HA's
- * own card-loading path, which reproducibly left the stream stuck on this
- * setup. Driving the WS protocol ourselves sidesteps that entirely. All
- * `<video>` elements here always run with `controls=false` plus our own
- * tap-to-toggle play/pause and mute button — never the browser's native
- * control chrome (which on Safari/iOS renders as the system AVKit player,
- * exactly what this card exists to avoid).
+ * The camera is selected directly from Frigate — not an HA camera entity.
+ * Live view goes straight to Frigate's own bundled go2rtc instance over
+ * WebRTC (`<go2rtc>:1984/api/webrtc?src=<camera>_<stream>`), and event/
+ * review data is scoped to that same Frigate camera name. Nothing here goes
+ * through Home Assistant's camera/WebRTC integration — `hass` is only used
+ * for the events-websocket fallback and locale-aware clock formatting.
+ *
+ * All `<video>` elements run with `controls=false`; play/pause, mute, and
+ * fullscreen live in a control bar below the stage, not as overlays.
+ * Playback always goes through hls.js — bundled directly into this file,
+ * not loaded from a CDN — even on Safari, via MediaSource Extensions,
+ * rather than handing Safari a raw .m3u8 (native HLS playback on Safari/
+ * iOS/macOS shows its own AirPlay/fullscreen chrome unconditionally,
+ * exactly the native player this card exists to avoid).
  *
  * No gallery, no thumbnails, no PTZ/talkback/zoom — deliberately narrow
  * scope so the card stays light.
@@ -33,10 +35,11 @@
  *
  * Config:
  *   type: custom:frigate-timeline-card
- *   camera_entity: camera.camera_spate      # required — HA camera entity for live view
  *   frigate_url: http://192.168.1.11:5000   # required — Frigate REST base, reachable from the browser
- *   frigate_camera: spate                   # optional — Frigate's camera name if it can't be derived from the entity id
- *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id (default "frigate")
+ *   frigate_camera: spate                   # required — Frigate's own camera name (not an HA entity)
+ *   frigate_stream: main                    # optional — go2rtc stream suffix: "main" (full quality) or "sub" (less lag). Default: main
+ *   go2rtc_url: http://192.168.1.11:1984    # optional — defaults to the frigate_url host on port 1984 (go2rtc's default)
+ *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id, for the events WS fallback (default "frigate")
  *   height: 44                              # optional — timeline strip height in px
  */
 
@@ -78,13 +81,13 @@ function shiftDayKey(dayKey, delta) {
 
 class FrigateTimelineCard extends HTMLElement {
   setConfig(config) {
-    if (!config.camera_entity) {
-      throw new Error("frigate-timeline-card: 'camera_entity' is required");
-    }
     if (!config.frigate_url) {
       throw new Error("frigate-timeline-card: 'frigate_url' is required");
     }
-    this._config = { height: 44, frigate_instance_id: "frigate", ...config };
+    if (!config.frigate_camera) {
+      throw new Error("frigate-timeline-card: 'frigate_camera' is required");
+    }
+    this._config = { height: 44, frigate_instance_id: "frigate", frigate_stream: "main", ...config };
     this._dayKey = todayKey();
     this._segments = [];
     this._events = [];
@@ -95,10 +98,9 @@ class FrigateTimelineCard extends HTMLElement {
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
-    // `_showLive()` no-ops without `hass` (needed for the WS handshake) —
-    // kick it off for real once `hass` actually arrives, unless the user is
-    // mid-clip-playback.
-    if (first && !this._playingClip) this._showLive();
+    // Live view goes straight to go2rtc and doesn't need `hass` at all —
+    // only the events websocket fallback does, so that's the only thing
+    // gated on its first arrival here.
     if (first) this._ensureData();
     // Lovelace calls this setter on every state-changed event across the
     // whole dashboard, which can be several times a second. Rebuilding the
@@ -117,9 +119,8 @@ class FrigateTimelineCard extends HTMLElement {
     return document.createElement("frigate-timeline-card-editor");
   }
 
-  static getStubConfig(hass) {
-    const cameraEntity = Object.keys(hass?.states || {}).find((id) => id.startsWith("camera."));
-    return { camera_entity: cameraEntity || "", frigate_url: "", height: 44 };
+  static getStubConfig() {
+    return { frigate_url: "", frigate_camera: "", height: 44 };
   }
 
   getCardSize() {
@@ -158,12 +159,7 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   _cameraObjectId() {
-    if (this._config.frigate_camera) return this._config.frigate_camera;
-    const objectId = String(this._config.camera_entity).split(".").slice(1).join(".");
-    // Most Frigate + HA setups name the HA camera entity `camera.camera_<name>`
-    // while Frigate's own camera key is just `<name>` — strip that prefix as
-    // the default heuristic; `frigate_camera` overrides it when it doesn't hold.
-    return objectId.replace(/^camera_/, "");
+    return this._config.frigate_camera;
   }
 
   _build() {
@@ -496,8 +492,14 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   _teardownWebRtc() {
-    this._rtcUnsub?.().catch?.(() => {});
-    this._rtcUnsub = null;
+    if (this._rtcWebSocket) {
+      try {
+        this._rtcWebSocket.close();
+      } catch (_) {
+        /* already closed */
+      }
+      this._rtcWebSocket = null;
+    }
     if (this._rtcPeerConnection) {
       try {
         this._rtcPeerConnection.close();
@@ -592,6 +594,34 @@ class FrigateTimelineCard extends HTMLElement {
     this._liveBtnEl = liveBtn;
   }
 
+  /** go2rtc's own base URL — defaults to the Frigate host on go2rtc's
+   * standard port 1984 (what Frigate bundles it on), overridable via
+   * `go2rtc_url` for setups where it differs. */
+  _go2rtcUrl() {
+    if (this._config.go2rtc_url) return String(this._config.go2rtc_url).replace(/\/+$/, "");
+    try {
+      const u = new URL(this._config.frigate_url);
+      return `${u.protocol}//${u.hostname}:1984`;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  /** go2rtc stream name for the selected Frigate camera — Frigate registers
+   * both a full-res `<camera>_main` and a lighter `<camera>_sub` stream in
+   * go2rtc; `frigate_stream` picks which (default "main"). */
+  _go2rtcStreamName() {
+    const suffix = this._config.frigate_stream || "main";
+    return `${this._config.frigate_camera}_${suffix}`;
+  }
+
+  /**
+   * Live view goes straight to Frigate's own go2rtc instance — not through
+   * Home Assistant's `camera/webrtc/*` bridge, and not tied to any HA
+   * camera entity at all. This is the same go2rtc WebRTC signaling
+   * protocol (WS handshake at `/api/webrtc?src=<name>`) already proven
+   * working in the companion camera-gallery-card fork's live view.
+   */
   async _showLive() {
     this._playingClip = null;
     this._pillMode = "live";
@@ -610,80 +640,78 @@ class FrigateTimelineCard extends HTMLElement {
     this._streamEl = video;
     this._bindVideoControls(video);
 
-    if (typeof RTCPeerConnection === "undefined" || !this._hass) return;
-    const entityId = this._config.camera_entity;
+    if (typeof RTCPeerConnection === "undefined") return;
+    const go2rtcBase = this._go2rtcUrl();
+    if (!go2rtcBase) return;
+    const streamName = this._go2rtcStreamName();
 
     try {
-      const clientConfig = await this._hass.callWS({
-        type: "camera/webrtc/get_client_config",
-        entity_id: entityId,
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      this._rtcPeerConnection = pc;
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
+      pc.ontrack = (e) => {
+        if (e.streams?.[0]) video.srcObject = e.streams[0];
+      };
+
+      const wsUrl = `${go2rtcBase.replace(/^http/, "ws")}/api/webrtc?src=${encodeURIComponent(streamName)}`;
+      if (typeof location !== "undefined" && location.protocol === "https:" && wsUrl.startsWith("ws://")) {
+        throw new Error(
+          `Mixed content blocked: page is HTTPS but go2rtc is http://. Put go2rtc behind a TLS reverse proxy, or set go2rtc_url to an https:// address.`
+        );
+      }
+
+      const ws = new WebSocket(wsUrl);
+      this._rtcWebSocket = ws;
+
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`go2rtc WS timeout after 10s (${wsUrl})`)), 10000);
+        ws.onopen = async () => {
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify({ type: "webrtc/offer", value: pc.localDescription.sdp }));
+          } catch (err) {
+            reject(err);
+          }
+        };
+        ws.onmessage = async (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            if (msg.type === "webrtc/answer") {
+              await pc.setRemoteDescription({ type: "answer", sdp: msg.value });
+              clearTimeout(timeout);
+              resolve();
+            } else if (msg.type === "webrtc/candidate") {
+              pc.addIceCandidate({ candidate: msg.value, sdpMid: "0" }).catch(() => {});
+            } else if (msg.type === "error") {
+              clearTimeout(timeout);
+              reject(new Error(`go2rtc reported: ${msg.value}`));
+            }
+          } catch (err) {
+            reject(err);
+          }
+        };
+        ws.onerror = () => {
+          clearTimeout(timeout);
+          reject(new Error("go2rtc WS error"));
+        };
+        ws.onclose = (e) => {
+          if (e.code !== 1000) {
+            clearTimeout(timeout);
+            reject(new Error(`go2rtc WS closed (code ${e.code})`));
+          }
+        };
       });
       if (token !== this._liveToken) return;
 
-      const pc = new RTCPeerConnection(clientConfig.configuration);
-      this._rtcPeerConnection = pc;
-      if (clientConfig.dataChannel) pc.createDataChannel(clientConfig.dataChannel);
-
-      const remoteStream = new MediaStream();
-      pc.ontrack = (e) => {
-        remoteStream.addTrack(e.track);
-        video.srcObject = remoteStream;
-      };
-      pc.addTransceiver("audio", { direction: "recvonly" });
-      pc.addTransceiver("video", { direction: "recvonly" });
-
-      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
-      await pc.setLocalDescription(offer);
-      if (token !== this._liveToken) return;
-
-      let sessionId = null;
-      const pendingCandidates = [];
       pc.onicecandidate = (e) => {
-        if (!e.candidate?.candidate) return;
-        if (sessionId) {
-          this._hass.callWS({
-            type: "camera/webrtc/candidate",
-            entity_id: entityId,
-            session_id: sessionId,
-            candidate: e.candidate.toJSON(),
-          });
-        } else {
-          pendingCandidates.push(e.candidate);
+        if (e.candidate && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "webrtc/candidate", value: e.candidate.candidate }));
         }
       };
-
-      this._rtcUnsub = await this._hass.connection.subscribeMessage(
-        (event) => {
-          if (token !== this._liveToken) return;
-          if (event.type === "session") {
-            sessionId = event.session_id;
-            pendingCandidates.splice(0).forEach((c) => {
-              this._hass.callWS({
-                type: "camera/webrtc/candidate",
-                entity_id: entityId,
-                session_id: sessionId,
-                candidate: c.toJSON(),
-              });
-            });
-          } else if (event.type === "answer") {
-            pc.setRemoteDescription({ type: "answer", sdp: event.answer }).catch((err) =>
-              console.warn("[frigate-timeline-card] setRemoteDescription failed", err)
-            );
-          } else if (event.type === "candidate") {
-            const c = event.candidate;
-            const candidate =
-              c.sdpMid || c.sdpMLineIndex != null
-                ? new RTCIceCandidate(c)
-                : new RTCIceCandidate({ candidate: c.candidate, sdpMid: "0" });
-            pc.addIceCandidate(candidate).catch(() => {});
-          } else if (event.type === "error") {
-            console.warn("[frigate-timeline-card] WebRTC error from backend:", event.message);
-          }
-        },
-        { type: "camera/webrtc/offer", entity_id: entityId, offer: offer.sdp }
-      );
     } catch (err) {
-      console.warn("[frigate-timeline-card] WebRTC live view failed", err);
+      console.warn("[frigate-timeline-card] go2rtc live view failed", err);
     }
   }
 
@@ -942,37 +970,31 @@ class FrigateTimelineCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    if (this._entityPicker) this._entityPicker.hass = hass;
   }
 
   _build() {
     this._built = true;
     this.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px 16px;">
-        <div id="ftc-ed-entity"></div>
         <div style="display:flex;gap:8px;">
           <ha-textfield id="ftc-ed-host" label="Server Frigate (ex: 192.168.1.11)" style="flex:2"></ha-textfield>
           <ha-textfield id="ftc-ed-port" label="Port" type="number" style="flex:1"></ha-textfield>
         </div>
         <div id="ftc-ed-camera-row">
-          <ha-textfield id="ftc-ed-camera" label="Nume cameră în Frigate (opțional, ex: spate)" style="width:100%"></ha-textfield>
+          <ha-textfield id="ftc-ed-camera" label="Cameră în Frigate (ex: spate)" style="width:100%"></ha-textfield>
         </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span style="font-size:13px;color:var(--secondary-text-color,#999);">Stream live:</span>
+          <select id="ftc-ed-stream" style="flex:1;padding:8px;border-radius:6px;">
+            <option value="main">main (calitate maximă)</option>
+            <option value="sub">sub (mai puțin lag)</option>
+          </select>
+        </div>
+        <ha-textfield id="ftc-ed-go2rtc" label="go2rtc URL (opțional, implicit port 1984 pe serverul Frigate)" style="width:100%"></ha-textfield>
         <ha-textfield id="ftc-ed-instance" label="Frigate instance id (implicit: frigate)" style="width:100%"></ha-textfield>
         <ha-textfield id="ftc-ed-height" label="Înălțime timeline (px)" type="number" style="width:100%"></ha-textfield>
       </div>
     `;
-    const entityRow = this.querySelector("#ftc-ed-entity");
-    const picker = document.createElement("ha-entity-picker");
-    picker.includeDomains = ["camera"];
-    picker.label = "Cameră (live view)";
-    picker.addEventListener("value-changed", (e) => {
-      e.stopPropagation();
-      this._update("camera_entity", e.detail.value);
-      this._suggestFrigateCamera();
-    });
-    entityRow.appendChild(picker);
-    this._entityPicker = picker;
-
     const onHostPortChange = () => {
       const host = this.querySelector("#ftc-ed-host")?.value?.trim() || "";
       const port = this.querySelector("#ftc-ed-port")?.value?.trim() || "";
@@ -983,6 +1005,8 @@ class FrigateTimelineCardEditor extends HTMLElement {
     this.querySelector("#ftc-ed-host").addEventListener("input", onHostPortChange);
     this.querySelector("#ftc-ed-port").addEventListener("input", onHostPortChange);
     this.querySelector("#ftc-ed-camera").addEventListener("input", (e) => this._update("frigate_camera", e.target.value));
+    this.querySelector("#ftc-ed-stream").addEventListener("change", (e) => this._update("frigate_stream", e.target.value));
+    this.querySelector("#ftc-ed-go2rtc").addEventListener("input", (e) => this._update("go2rtc_url", e.target.value));
     this.querySelector("#ftc-ed-instance").addEventListener("input", (e) => this._update("frigate_instance_id", e.target.value));
     this.querySelector("#ftc-ed-height").addEventListener("input", (e) => this._update("height", Number(e.target.value) || 44));
 
@@ -1000,10 +1024,9 @@ class FrigateTimelineCardEditor extends HTMLElement {
   }
 
   /** Fetches Frigate's real camera list (from /api/config) and swaps the
-   * free-text "frigate_camera" field for a dropdown once it succeeds — this
-   * is what actually links the chosen HA camera to its Frigate name, instead
-   * of relying on the `camera_<name>` stripping heuristic. Silently keeps
-   * the text field as a fallback if the fetch fails (e.g. CORS). */
+   * free-text "frigate_camera" field for a dropdown once it succeeds.
+   * Silently keeps the text field as a fallback if the fetch fails
+   * (e.g. CORS). */
   async _fetchFrigateCameraList() {
     const url = this._config.frigate_url;
     if (!url) return;
@@ -1018,7 +1041,6 @@ class FrigateTimelineCardEditor extends HTMLElement {
       if (!names.length) return;
       this._frigateCameraNames = names;
       this._renderCameraField();
-      this._suggestFrigateCamera();
     } catch (_) {
       // CORS-blocked or unreachable — the plain text field stays as-is.
     }
@@ -1040,26 +1062,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
     sel.addEventListener("closed", (e) => e.stopPropagation());
   }
 
-  /** Best-effort auto-link: match the HA camera entity's object_id (with or
-   * without a leading `camera_`) against Frigate's real camera list. */
-  _suggestFrigateCamera() {
-    if (this._config.frigate_camera || !this._frigateCameraNames?.length) return;
-    const entity = this._config.camera_entity;
-    if (!entity) return;
-    const objectId = String(entity).split(".").slice(1).join(".");
-    const candidates = [objectId, objectId.replace(/^camera_/, "")];
-    const match = this._frigateCameraNames.find((n) => candidates.includes(n));
-    if (match) {
-      this._update("frigate_camera", match);
-      this._renderCameraField();
-    }
-  }
-
   _sync() {
-    if (this._entityPicker) {
-      this._entityPicker.value = this._config.camera_entity || "";
-      if (this._hass) this._entityPicker.hass = this._hass;
-    }
     const set = (id, val) => {
       const el = this.querySelector(id);
       if (el && el.value !== String(val ?? "")) el.value = val ?? "";
@@ -1068,6 +1071,8 @@ class FrigateTimelineCardEditor extends HTMLElement {
     set("#ftc-ed-host", host);
     set("#ftc-ed-port", port);
     if (!this._frigateCameraNames?.length) set("#ftc-ed-camera", this._config.frigate_camera);
+    set("#ftc-ed-stream", this._config.frigate_stream || "main");
+    set("#ftc-ed-go2rtc", this._config.go2rtc_url);
     set("#ftc-ed-instance", this._config.frigate_instance_id);
     set("#ftc-ed-height", this._config.height ?? 44);
   }
