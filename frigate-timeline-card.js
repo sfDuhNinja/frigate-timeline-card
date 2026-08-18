@@ -148,8 +148,20 @@ class FrigateTimelineCard extends HTMLElement {
     // arrival, since `_build()` runs before `hass` exists at all.
     if (first && !this._playingClip) this._showLive();
     if (this._streamEl?.tagName === "HA-CAMERA-STREAM") {
-      this._streamEl.hass = hass;
-      this._streamEl.stateObj = hass.states?.[this._config.camera_entity];
+      // Same "fires several times a second" hass churn as the comment below
+      // describes — reassigning `.hass`/`.stateObj` on ha-camera-stream that
+      // often was causing periodic stutter on live, even when nothing about
+      // the camera itself had changed (most of those updates are unrelated
+      // entities elsewhere on the dashboard). HA gives unchanged entities
+      // the same `hass.states[id]` object reference across updates, so
+      // comparing it is a reliable "did this camera's state actually
+      // change" check — only touch the stream element when it did.
+      const camStateObj = hass.states?.[this._config.camera_entity];
+      if (camStateObj !== this._lastCamStateObj) {
+        this._lastCamStateObj = camStateObj;
+        this._streamEl.hass = hass;
+        this._streamEl.stateObj = camStateObj;
+      }
     }
     if (first) this._ensureData();
     // Lovelace calls this setter on every state-changed event across the
@@ -757,7 +769,8 @@ class FrigateTimelineCard extends HTMLElement {
     if (token !== this._liveToken) return;
 
     const player = document.createElement("ha-camera-stream");
-    player.stateObj = this._hass.states?.[this._config.camera_entity];
+    this._lastCamStateObj = this._hass.states?.[this._config.camera_entity];
+    player.stateObj = this._lastCamStateObj;
     player.hass = this._hass;
     player.muted = true; // starts muted so autoplay is allowed; the mute button toggles it
     player.controls = false;
