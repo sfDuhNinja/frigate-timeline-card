@@ -1144,10 +1144,14 @@ class FrigateTimelineCard extends HTMLElement {
     }
   }
 
-  /** Direct go2rtc WebRTC signaling (WS handshake at `/api/webrtc?src=`),
-   * the same protocol the companion camera-gallery-card fork uses. A plain
-   * `<video>` this time (not a wrapper element), so play/pause and mute
-   * bind normally via `_bindVideoControls`. */
+  /** Direct go2rtc WebRTC signaling — WS handshake at `/api/ws?src=`
+   * (go2rtc's actual WebSocket signaling endpoint; `/api/webrtc` is a
+   * separate HTTP-only WHIP/WHEP-style endpoint, not a WS upgrade target
+   * — using it here is exactly what "bad response from the server" on the
+   * WS connection meant). Message shapes (`webrtc/offer`/`answer`/
+   * `candidate`) are unchanged. A plain `<video>` this time (not a
+   * wrapper element), so play/pause and mute bind normally via
+   * `_bindVideoControls`. */
   async _showLiveViaGo2rtc(token) {
     const video = document.createElement("video");
     video.autoplay = true;
@@ -1180,7 +1184,7 @@ class FrigateTimelineCard extends HTMLElement {
         if (e.streams?.[0]) video.srcObject = e.streams[0];
       };
 
-      const wsUrl = `${go2rtcBase.replace(/^http/, "ws")}/api/webrtc?src=${encodeURIComponent(streamName)}`;
+      const wsUrl = `${go2rtcBase.replace(/^http/, "ws")}/api/ws?src=${encodeURIComponent(streamName)}`;
       if (typeof location !== "undefined" && location.protocol === "https:" && wsUrl.startsWith("ws://")) {
         throw new Error(
           "Mixed content blocked: page is HTTPS but go2rtc is http://. Put go2rtc behind a TLS reverse proxy, or set go2rtc_url to an https:// address."
