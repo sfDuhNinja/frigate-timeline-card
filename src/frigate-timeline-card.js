@@ -1066,8 +1066,8 @@ class FrigateTimelineCard extends HTMLElement {
 
   _seekTo(frac) {
     const win = this._currentWindow();
-    const ts = win.start + frac * (win.end - win.start);
-    this._playAt(ts);
+    const raw = win.start + frac * (win.end - win.start);
+    this._playAt(this._nearestEventStartMs(raw));
   }
 
   async _ensureData() {
