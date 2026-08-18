@@ -95,6 +95,79 @@ const ICON_CHEVRON_UP =
 const ICON_CHEVRON_DOWN =
   '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 16l6-6-1.41-1.41L12 13.17 7.41 8.59 6 10z"/></svg>';
 
+// Romanian + English UI strings, auto-selected from HA's own configured
+// locale (`hass.locale.language`, falling back to `hass.language`) — no
+// config option, since the ask was automatic selection, not a manual
+// override. Anything not in this dict (or arriving before `hass` is known)
+// falls back to English.
+const I18N = {
+  ro: {
+    prevDay: "Ziua anterioară",
+    nextDay: "Ziua următoare",
+    today: "Astăzi",
+    toggleTimeline: "Ascunde/afișează timeline",
+    playPause: "Redare/Pauză",
+    muteUnmute: "Mut/Sunet",
+    fullscreen: "Ecran complet",
+    backToLive: "Revino la live",
+    live: "Live",
+    clipLoadError: "Nu s-a putut încărca clipul de la Frigate — verifică CORS (Access-Control-Allow-Origin) pe server.",
+    recordingLoadError: "Nu s-a putut încărca înregistrarea de la Frigate.",
+    liveFrigateError: "Live direct prin Frigate a eșuat (verifică go2rtc_url, sau CORS/mixed-content dacă dashboard-ul e pe https).",
+    edCamera: "Cameră (live view, via ha-camera-stream)",
+    edHost: "Server Frigate (ex: 192.168.1.11)",
+    edPort: "Port",
+    edFrigateCamera: "Cameră în Frigate (ex: spate)",
+    edFrigateCameraSelect: "Cameră în Frigate",
+    edInstance: "Frigate instance id (implicit: frigate)",
+    edHeight: "Înălțime timeline (px)",
+    edZoom: "Zoom implicit (ore)",
+    edAutohide: "Auto-hide timeline (secunde de inactivitate, 0 = dezactivat)",
+    edLiveSource: "Sursă live",
+    edLiveSourceHa: "Home Assistant (ha-camera-stream, implicit)",
+    edLiveSourceFrigate: "Frigate direct (go2rtc, bypass HA WebRTC)",
+    edGo2rtcUrl: "go2rtc URL (implicit: host Frigate, port 1984)",
+    edStream: "Stream",
+  },
+  en: {
+    prevDay: "Previous day",
+    nextDay: "Next day",
+    today: "Today",
+    toggleTimeline: "Hide/show timeline",
+    playPause: "Play/Pause",
+    muteUnmute: "Mute/Unmute",
+    fullscreen: "Fullscreen",
+    backToLive: "Back to live",
+    live: "Live",
+    clipLoadError: "Couldn't load the clip from Frigate — check CORS (Access-Control-Allow-Origin) on the server.",
+    recordingLoadError: "Couldn't load the recording from Frigate.",
+    liveFrigateError: "Direct Frigate live failed (check go2rtc_url, or CORS/mixed-content if the dashboard is on https).",
+    edCamera: "Camera (live view, via ha-camera-stream)",
+    edHost: "Frigate server (e.g. 192.168.1.11)",
+    edPort: "Port",
+    edFrigateCamera: "Camera in Frigate (e.g. spate)",
+    edFrigateCameraSelect: "Camera in Frigate",
+    edInstance: "Frigate instance id (default: frigate)",
+    edHeight: "Timeline strip height (px)",
+    edZoom: "Default zoom (hours)",
+    edAutohide: "Auto-hide timeline (seconds of inactivity, 0 = disabled)",
+    edLiveSource: "Live source",
+    edLiveSourceHa: "Home Assistant (ha-camera-stream, default)",
+    edLiveSourceFrigate: "Direct Frigate (go2rtc, bypass HA WebRTC)",
+    edGo2rtcUrl: "go2rtc URL (default: Frigate host, port 1984)",
+    edStream: "Stream",
+  },
+};
+
+function pickLang(hass) {
+  const lang = String(hass?.locale?.language || hass?.language || "en").toLowerCase();
+  return lang.startsWith("ro") ? "ro" : "en";
+}
+
+function translate(hass, key) {
+  return I18N[pickLang(hass)]?.[key] ?? I18N.en[key] ?? key;
+}
+
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -119,6 +192,36 @@ function shiftDayKey(dayKey, delta) {
 }
 
 class FrigateTimelineCard extends HTMLElement {
+  _t(key) {
+    return translate(this._hass, key);
+  }
+
+  /** Re-applies every translated label/title once `hass` (and its locale)
+   * is actually known — `_build()` runs synchronously from `setConfig()`,
+   * before `hass` ever arrives, so button titles/text created there start
+   * out English-default and need a refresh the first time the real
+   * language becomes available. */
+  _applyI18n() {
+    if (this._prevDayBtnEl) this._prevDayBtnEl.title = this._t("prevDay");
+    if (this._nextDayBtnEl) this._nextDayBtnEl.title = this._t("nextDay");
+    if (this._timelineToggleBtn) this._timelineToggleBtn.title = this._t("toggleTimeline");
+    if (this._playBtnEl) this._playBtnEl.title = this._t("playPause");
+    if (this._muteBtnEl) this._muteBtnEl.title = this._t("muteUnmute");
+    if (this._fsBtnEl) this._fsBtnEl.title = this._t("fullscreen");
+    if (this._liveBtnEl) {
+      this._liveBtnEl.title = this._t("backToLive");
+      const dot = this._liveBtnEl.querySelector(".ftc-live-dot");
+      this._liveBtnEl.innerHTML = "";
+      if (dot) this._liveBtnEl.appendChild(dot);
+      else {
+        const d = document.createElement("span");
+        d.className = "ftc-live-dot";
+        this._liveBtnEl.appendChild(d);
+      }
+      this._liveBtnEl.appendChild(document.createTextNode(this._t("live")));
+    }
+  }
+
   setConfig(config) {
     if (!config.frigate_url) {
       throw new Error("frigate-timeline-card: 'frigate_url' is required");
@@ -150,6 +253,9 @@ class FrigateTimelineCard extends HTMLElement {
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
+    // Language (from hass.locale) is also only known once hass arrives —
+    // refresh the labels/titles built English-default during _build().
+    if (first) this._applyI18n();
     // ha-camera-stream needs `hass`/`stateObj` for the live view, and the
     // events fallback needs `hass.connection` — both gated on its first
     // arrival, since `_build()` runs before `hass` exists at all.
@@ -385,6 +491,7 @@ class FrigateTimelineCard extends HTMLElement {
     this._wireTrackInteraction();
     this._wireNowLineScrub();
     this._wireAutoHide();
+    this._prevDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="-1"]');
     this._nextDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="1"]');
     this.querySelectorAll(".ftc-navbtn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -395,6 +502,7 @@ class FrigateTimelineCard extends HTMLElement {
       });
     });
     this._updateDayNavState();
+    this._applyI18n();
     this._showLive();
   }
 
@@ -521,12 +629,12 @@ class FrigateTimelineCard extends HTMLElement {
 
     const previewAt = (frac) => {
       const win = this._currentWindow();
-      const raw = win.start + frac * (win.end - win.start);
-      // Scrubbing snaps to the nearest event's start — landing on an exact
-      // arbitrary drag position is far less useful than landing where
-      // something actually happened, since most of the timeline is empty.
-      const ts = this._nearestEventStartMs(raw);
-      const pct = Math.min(100, Math.max(0, ((ts - win.start) / (win.end - win.start)) * 100));
+      // Scrubbing goes wherever you drag — free positioning, not snapped to
+      // an event. (Tap/click still snaps to the nearest event's start, via
+      // _seekTo() — that's a deliberate difference: a tap is a single
+      // decisive pick, a drag is exploratory and should go anywhere.)
+      const ts = win.start + frac * (win.end - win.start);
+      const pct = frac * 100;
       this._nowLineEl.style.display = "";
       this._nowPillEl.style.display = "";
       this._nowLineEl.style.left = `${pct}%`;
@@ -800,7 +908,7 @@ class FrigateTimelineCard extends HTMLElement {
     const playBtn = document.createElement("button");
     playBtn.className = "ftc-ctlbtn";
     playBtn.innerHTML = ICON_PLAY;
-    playBtn.title = "Play/Pause";
+    playBtn.title = this._t("playPause");
     playBtn.addEventListener("click", () => {
       if (!this._videoEl) return;
       if (this._videoEl.paused) this._videoEl.play().catch(() => {});
@@ -810,7 +918,7 @@ class FrigateTimelineCard extends HTMLElement {
     const muteBtn = document.createElement("button");
     muteBtn.className = "ftc-ctlbtn";
     muteBtn.innerHTML = ICON_VOLUME_OFF;
-    muteBtn.title = "Mute/Unmute";
+    muteBtn.title = this._t("muteUnmute");
     muteBtn.addEventListener("click", () => {
       // Clip mode: this._videoEl is a plain <video>. Live mode: it's null
       // (ha-camera-stream isn't a <video>) — toggle the stream element's
@@ -824,7 +932,7 @@ class FrigateTimelineCard extends HTMLElement {
     const fsBtn = document.createElement("button");
     fsBtn.className = "ftc-ctlbtn";
     fsBtn.innerHTML = ICON_FULLSCREEN;
-    fsBtn.title = "Fullscreen";
+    fsBtn.title = this._t("fullscreen");
     fsBtn.addEventListener("click", () => {
       const doc = document;
       const isFs = doc.fullscreenElement || doc.webkitFullscreenElement;
@@ -870,13 +978,14 @@ class FrigateTimelineCard extends HTMLElement {
 
     const liveBtn = document.createElement("button");
     liveBtn.className = "ftc-ctlbtn ftc-live-btn";
-    liveBtn.innerHTML = '<span class="ftc-live-dot"></span>Live';
-    liveBtn.title = "Revino la live";
+    liveBtn.innerHTML = `<span class="ftc-live-dot"></span>${this._t("live")}`;
+    liveBtn.title = this._t("backToLive");
     liveBtn.addEventListener("click", () => this._showLive());
 
     bar.append(playBtn, muteBtn, fsBtn, liveBtn);
     this._playBtnEl = playBtn;
     this._muteBtnEl = muteBtn;
+    this._fsBtnEl = fsBtn;
     this._liveBtnEl = liveBtn;
 
     // Timeline show/hide lives next to the day selector, not with the
@@ -886,7 +995,7 @@ class FrigateTimelineCard extends HTMLElement {
     const timelineToggleBtn = document.createElement("button");
     timelineToggleBtn.className = "ftc-navbtn";
     timelineToggleBtn.innerHTML = ICON_CHEVRON_UP;
-    timelineToggleBtn.title = "Ascunde/afișează timeline";
+    timelineToggleBtn.title = this._t("toggleTimeline");
     timelineToggleBtn.addEventListener("click", () => this._setTimelineHidden(!this._timelineHidden, true));
     daynav?.appendChild(timelineToggleBtn);
     this._timelineToggleBtn = timelineToggleBtn;
@@ -1125,7 +1234,7 @@ class FrigateTimelineCard extends HTMLElement {
       console.warn("[frigate-timeline-card] go2rtc live view failed", err);
       if (token === this._liveToken) {
         this._showStageError(
-          "Live direct prin Frigate a eșuat (verifică go2rtc_url, sau CORS/mixed-content dacă dashboard-ul e pe https)."
+          this._t("liveFrigateError")
         );
       }
     }
@@ -1222,9 +1331,7 @@ class FrigateTimelineCard extends HTMLElement {
     const tryHlsJs = () => {
       const attach = () => {
         if (!window.Hls?.isSupported()) {
-          this._showStageError(
-            "Nu s-a putut încărca clipul de la Frigate — verifică CORS (Access-Control-Allow-Origin) pe server."
-          );
+          this._showStageError(this._t("clipLoadError"));
           return;
         }
         const hls = new window.Hls({ maxBufferLength: 30, backBufferLength: 30 });
@@ -1234,9 +1341,7 @@ class FrigateTimelineCard extends HTMLElement {
           if (!data?.fatal) return;
           console.warn("[frigate-timeline-card] hls.js fatal error", data);
           this._teardownHls();
-          this._showStageError(
-            "Nu s-a putut încărca clipul de la Frigate — verifică CORS (Access-Control-Allow-Origin) pe server."
-          );
+          this._showStageError(this._t("clipLoadError"));
         });
         this._hls = hls;
       };
@@ -1476,7 +1581,7 @@ class FrigateTimelineCard extends HTMLElement {
     if (this._dayLabelEl) {
       const isToday = this._dayKey === todayKey();
       this._dayLabelEl.textContent = isToday
-        ? "Astăzi"
+        ? this._t("today")
         : new Date(win.start).toLocaleDateString(this._hass?.locale?.language || undefined, {
             day: "numeric",
             month: "short",
@@ -1501,8 +1606,27 @@ class FrigateTimelineCardEditor extends HTMLElement {
   }
 
   set hass(hass) {
+    const first = !this._hass;
     this._hass = hass;
     if (this._entityPicker) this._entityPicker.hass = hass;
+    // Language (from hass.locale) is only known once hass arrives — the
+    // form was built English-default in _build() (which runs before hass
+    // exists), so refresh every label the first time it's available.
+    if (first) this._applyI18n();
+  }
+
+  _t(key) {
+    return translate(this._hass, key);
+  }
+
+  /** Re-applies every `[data-i18n]` label's text once `hass`'s locale is
+   * known — see the `set hass()` comment for why this can't just be baked
+   * into the static template. */
+  _applyI18n() {
+    this.querySelectorAll("[data-i18n]").forEach((el) => {
+      el.textContent = this._t(el.dataset.i18n);
+    });
+    if (this._entityPicker) this._entityPicker.label = this._t("edCamera");
   }
 
   /**
@@ -1526,53 +1650,53 @@ class FrigateTimelineCardEditor extends HTMLElement {
         <div id="ftc-ed-entity"></div>
         <div class="ftc-ed-row">
           <label class="ftc-ed-field" style="flex:2">
-            <span>Server Frigate (ex: 192.168.1.11)</span>
+            <span data-i18n="edHost">Server Frigate (ex: 192.168.1.11)</span>
             <input id="ftc-ed-host" type="text" />
           </label>
           <label class="ftc-ed-field" style="flex:1">
-            <span>Port</span>
+            <span data-i18n="edPort">Port</span>
             <input id="ftc-ed-port" type="number" />
           </label>
         </div>
         <div id="ftc-ed-camera-row">
           <label class="ftc-ed-field">
-            <span>Cameră în Frigate (ex: spate)</span>
+            <span data-i18n="edFrigateCamera">Cameră în Frigate (ex: spate)</span>
             <input id="ftc-ed-camera" type="text" />
           </label>
         </div>
         <label class="ftc-ed-field">
-          <span>Frigate instance id (implicit: frigate)</span>
+          <span data-i18n="edInstance">Frigate instance id (implicit: frigate)</span>
           <input id="ftc-ed-instance" type="text" />
         </label>
         <div class="ftc-ed-row">
           <label class="ftc-ed-field" style="flex:1">
-            <span>Înălțime timeline (px)</span>
+            <span data-i18n="edHeight">Înălțime timeline (px)</span>
             <input id="ftc-ed-height" type="number" />
           </label>
           <label class="ftc-ed-field" style="flex:1">
-            <span>Zoom implicit (ore)</span>
+            <span data-i18n="edZoom">Zoom implicit (ore)</span>
             <input id="ftc-ed-zoom" type="number" step="0.25" min="0.25" max="24" />
           </label>
         </div>
         <label class="ftc-ed-field">
-          <span>Auto-hide timeline (secunde de inactivitate, 0 = dezactivat)</span>
+          <span data-i18n="edAutohide">Auto-hide timeline (secunde de inactivitate, 0 = dezactivat)</span>
           <input id="ftc-ed-autohide" type="number" min="0" step="1" />
         </label>
         <label class="ftc-ed-field">
-          <span>Sursă live</span>
+          <span data-i18n="edLiveSource">Sursă live</span>
           <select id="ftc-ed-live-source">
-            <option value="ha">Home Assistant (ha-camera-stream, implicit)</option>
-            <option value="frigate">Frigate direct (go2rtc, bypass HA WebRTC)</option>
+            <option value="ha" data-i18n="edLiveSourceHa">Home Assistant (ha-camera-stream, implicit)</option>
+            <option value="frigate" data-i18n="edLiveSourceFrigate">Frigate direct (go2rtc, bypass HA WebRTC)</option>
           </select>
         </label>
         <div id="ftc-ed-go2rtc-row" style="display:flex;flex-direction:column;gap:16px;">
           <div class="ftc-ed-row">
             <label class="ftc-ed-field" style="flex:2">
-              <span>go2rtc URL (implicit: host Frigate, port 1984)</span>
+              <span data-i18n="edGo2rtcUrl">go2rtc URL (implicit: host Frigate, port 1984)</span>
               <input id="ftc-ed-go2rtc-url" type="text" placeholder="http://192.168.1.11:1984" />
             </label>
             <label class="ftc-ed-field" style="flex:1">
-              <span>Stream</span>
+              <span data-i18n="edStream">Stream</span>
               <select id="ftc-ed-frigate-stream">
                 <option value="main">main</option>
                 <option value="sub">sub</option>
@@ -1604,7 +1728,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
     const entityRow = this.querySelector("#ftc-ed-entity");
     const picker = document.createElement("ha-entity-picker");
     picker.includeDomains = ["camera"];
-    picker.label = "Cameră (live view, via ha-camera-stream)";
+    picker.label = this._t("edCamera");
     picker.addEventListener("value-changed", (e) => {
       e.stopPropagation();
       this._update("camera_entity", e.detail.value);
@@ -1634,6 +1758,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
     this.querySelector("#ftc-ed-go2rtc-url").addEventListener("input", (e) => this._update("go2rtc_url", e.target.value));
     this.querySelector("#ftc-ed-frigate-stream").addEventListener("change", (e) => this._update("frigate_stream", e.target.value));
 
+    this._applyI18n();
     this._fetchFrigateCameraList();
   }
 
@@ -1675,7 +1800,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
     if (!row || !this._frigateCameraNames?.length) return;
     row.innerHTML = `
       <label class="ftc-ed-field">
-        <span>Cameră în Frigate</span>
+        <span>${this._t("edFrigateCameraSelect")}</span>
         <select id="ftc-ed-camera-select">
           ${this._frigateCameraNames.map((n) => `<option value="${n}">${n}</option>`).join("")}
         </select>
