@@ -591,6 +591,30 @@ class FrigateTimelineCard extends HTMLElement {
     if (this._liveBtnEl) this._liveBtnEl.classList.toggle("active", this._pillMode !== "live");
   }
 
+  /** Recursively finds a `<video>` element inside `node`, descending into
+   * open shadow roots as needed — `ha-camera-stream` renders its actual
+   * `<video>` two custom-element layers deep (`ha-camera-stream` →
+   * `ha-hls-player`/`ha-web-rtc-player` → `<video>`), each in its own
+   * shadow root, so a plain `querySelector('video')` can't reach it (that
+   * doesn't cross shadow boundaries). Needed for iOS Safari fullscreen,
+   * which only works via a real `<video>` element's own
+   * `webkitEnterFullscreen()` — the generic Fullscreen API is unreliable
+   * there for arbitrary elements. */
+  _findVideoDeep(node, depth = 4) {
+    if (!node || depth < 0) return null;
+    if (node instanceof HTMLVideoElement) return node;
+    const root = node.shadowRoot || node;
+    if (!root.querySelectorAll) return null;
+    for (const el of root.querySelectorAll("*")) {
+      if (el instanceof HTMLVideoElement) return el;
+      if (el.shadowRoot) {
+        const found = this._findVideoDeep(el, depth - 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
   /** Builds the shared control bar once — play/pause, mute, fullscreen,
    * and "back to live" — wired generically against `this._videoEl`, so the
    * same buttons keep working across live ↔ clip swaps without rebuilding. */
@@ -631,21 +655,39 @@ class FrigateTimelineCard extends HTMLElement {
         (doc.exitFullscreen || doc.webkitExitFullscreen)?.call(doc);
         return;
       }
-      // Prefer requesting fullscreen on the actual playing <video> (clip
-      // mode) rather than the stage container — far more reliably supported
-      // cross-browser, especially on WebKit, than fullscreening an
-      // arbitrary <div> that (in live mode) wraps another custom element's
-      // own shadow-rooted <video>. The stage div is still the fallback for
-      // live, where no plain <video> is reachable from here at all.
-      const target = this._videoEl || this._stageEl;
+      // The actual <video> — clip mode has it directly on `this._videoEl`;
+      // live mode needs the recursive shadow-DOM search since
+      // `ha-camera-stream` never exposes one to us directly.
+      const videoEl = this._videoEl || this._findVideoDeep(this._streamEl);
+      const iosFallback = () => {
+        if (videoEl?.webkitEnterFullscreen) {
+          videoEl.webkitEnterFullscreen(); // iPhone/iPad Safari — video-only API, but the only one that reliably works there
+        } else {
+          console.warn("[frigate-timeline-card] Fullscreen API unavailable for this element");
+        }
+      };
+      // Prefer the standard Fullscreen API on the actual <video> (or the
+      // stage container in live mode, if no video was found) — works on
+      // desktop and Android. iOS Safari's support for it on arbitrary
+      // elements is unreliable (the promise can resolve without actually
+      // entering fullscreen), so double-check `document.fullscreenElement`
+      // actually got set afterward, and fall back to the iOS-specific API
+      // on rejection or silent no-op either way.
+      const target = videoEl || this._stageEl;
       if (target?.requestFullscreen) {
-        target.requestFullscreen().catch((err) => console.warn("[frigate-timeline-card] requestFullscreen failed", err));
+        target
+          .requestFullscreen()
+          .then(() => {
+            if (!document.fullscreenElement) iosFallback();
+          })
+          .catch((err) => {
+            console.warn("[frigate-timeline-card] requestFullscreen failed", err);
+            iosFallback();
+          });
       } else if (target?.webkitRequestFullscreen) {
         target.webkitRequestFullscreen();
-      } else if (this._videoEl?.webkitEnterFullscreen) {
-        this._videoEl.webkitEnterFullscreen(); // iPhone Safari
       } else {
-        console.warn("[frigate-timeline-card] Fullscreen API unavailable for this element");
+        iosFallback();
       }
     });
 
