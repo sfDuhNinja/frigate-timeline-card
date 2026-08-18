@@ -1399,12 +1399,9 @@ class FrigateTimelineCard extends HTMLElement {
     this._renderTimeline();
   }
 
-  /** Formats a Date as "8:56:54 PM" style — matches the reference now-pill. */
+  /** Formats a Date as "20:56:54" — 24h, used for the now-pill. */
   _formatClock(d) {
-    let h = d.getHours();
-    const ampm = h >= 12 ? "PM" : "AM";
-    h = h % 12 || 12;
-    return `${h}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${ampm}`;
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
   }
 
   _updateNowPill() {
@@ -1452,7 +1449,12 @@ class FrigateTimelineCard extends HTMLElement {
       const left = ((st - win.start) / span) * 100;
       const width = Math.max(((en - st) / span) * 100, 0.15);
       const cls = s.severity === "alert" ? "alert" : "detect";
-      barsHtml += `<div class="ftc-bar ${cls}" style="left:${left}%;width:${width}%;"></div>`;
+      // Trim a fixed couple of px off each bar's width (not a % — stays a
+      // constant, barely-there gap at any zoom level) so back-to-back
+      // events read as distinct bars, matching Frigate's own timeline,
+      // instead of fusing into one indistinguishable block when they
+      // happen to touch or nearly touch in time.
+      barsHtml += `<div class="ftc-bar ${cls}" style="left:${left}%;width:max(1px, calc(${width}% - 2px));"></div>`;
     }
     this._trackEl.innerHTML = barsHtml;
     this._updateNowPill();
