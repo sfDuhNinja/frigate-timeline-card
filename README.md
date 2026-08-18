@@ -23,22 +23,32 @@ A minimal Home Assistant Lovelace card: a live camera view plus a horizontal, Fr
 
 ```yaml
 type: custom:frigate-timeline-card
-camera_entity: camera.camera_spate      # required — HA camera entity for the live view
+camera_entity: camera.camera_spate      # required unless live_source: frigate — HA camera entity for the live view
 frigate_url: http://192.168.1.11:5000   # required — Frigate REST base, reachable from the browser
-frigate_camera: spate                   # optional — Frigate's camera name, if it can't be derived from the entity id
+frigate_camera: spate                   # required — Frigate's own camera name (not the HA entity)
 frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id (default: "frigate")
 height: 44                              # optional — timeline strip height in px
+default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default: 10)
+auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default: 0, disabled)
+live_source: ha                         # optional — "ha" (default) or "frigate" (direct go2rtc WebRTC, bypasses HA's WebRTC bridge)
+go2rtc_url: http://192.168.1.11:1984    # optional — only used when live_source: frigate; defaults to the frigate_url host on port 1984
+frigate_stream: main                    # optional — only used when live_source: frigate; go2rtc stream suffix, "main" or "sub"
 ```
 
-A visual editor is also available (entity picker + text fields) when adding the card through the dashboard UI.
+A visual editor is also available (entity picker + form fields) when adding the card through the dashboard UI — every option above is reachable there, no YAML editing required.
 
 | Option | Required | Default | Description |
 |---|---|---|---|
-| `camera_entity` | yes | — | HA `camera.*` entity used for the live WebRTC view |
+| `camera_entity` | unless `live_source: frigate` | — | HA `camera.*` entity used for the live view (via `ha-camera-stream`) |
 | `frigate_url` | yes | — | Frigate's REST base URL, e.g. `http://192.168.1.11:5000` |
-| `frigate_camera` | no | derived from `camera_entity` by stripping a leading `camera_` | Frigate's own camera name, if it differs |
+| `frigate_camera` | yes | — | Frigate's own camera name (not the HA entity), used to scope events/review data and clip playback |
 | `frigate_instance_id` | no | `frigate` | The Frigate HA integration's config-entry id, used for the websocket fallback |
 | `height` | no | `44` | Timeline strip height in pixels |
+| `default_zoom_hours` | no | `10` | Initial timeline zoom window, in hours (0.25–24) |
+| `auto_hide_seconds` | no | `0` | Auto-collapses the timeline after this many seconds of no interaction; `0` disables it |
+| `live_source` | no | `ha` | `ha` uses `ha-camera-stream` (recommended — same-origin, no mixed-content risk); `frigate` connects straight to Frigate's own go2rtc over WebRTC, bypassing HA's WebRTC bridge — opt-in, since it reintroduces the mixed-content failure mode `ha` avoids on https dashboards |
+| `go2rtc_url` | no | Frigate host on port `1984` | Only used when `live_source: frigate`; overrides go2rtc's address when it differs from the default |
+| `frigate_stream` | no | `main` | Only used when `live_source: frigate`; which go2rtc stream to use, `main` (full quality) or `sub` (lighter) |
 
 ## Why this exists
 
