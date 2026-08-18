@@ -1619,6 +1619,11 @@ class FrigateTimelineCardEditor extends HTMLElement {
     // form was built English-default in _build() (which runs before hass
     // exists), so refresh every label the first time it's available.
     if (first) this._applyI18n();
+    // The WS camera-discovery fallback needs hass.connection, which also
+    // wasn't available yet if _build()'s initial fetch ran before hass
+    // arrived — retry now that it's known, in case that first attempt
+    // fell through to a no-op.
+    if (first && !this._frigateCameraNames?.length) this._fetchFrigateCameraList();
   }
 
   _t(key) {
@@ -1789,15 +1794,53 @@ class FrigateTimelineCardEditor extends HTMLElement {
     const token = (this._camFetchToken = (this._camFetchToken || 0) + 1);
     try {
       const res = await fetch(`${base}/api/config`);
-      if (!res.ok) return;
-      const cfg = await res.json();
+      if (res.ok) {
+        const cfg = await res.json();
+        if (token !== this._camFetchToken) return;
+        const names = Object.keys(cfg?.cameras || {});
+        if (names.length) {
+          this._frigateCameraNames = names;
+          this._renderCameraField();
+          return;
+        }
+      }
+    } catch (_) {
+      // CORS-blocked or unreachable — most self-hosted Frigate instances
+      // don't send Access-Control-Allow-Origin. Fall through to the WS
+      // route below instead of leaving the plain text field as the only
+      // option.
+    }
+    await this._fetchFrigateCameraListViaWs(token);
+  }
+
+  /** Fallback camera-name discovery for when direct REST to Frigate is
+   * CORS-blocked or unreachable. Reuses the exact same WS path
+   * (`frigate/events/get`) already proven working for the main card's
+   * event fetching — same-origin through Home Assistant, immune to CORS
+   * — asking for a wide, unfiltered window and collecting the distinct
+   * `camera` values seen across returned events. Less authoritative than
+   * `/api/config` (a camera with zero events in the window won't show
+   * up), but it's the best available discovery source when the direct
+   * REST call can't be made at all. */
+  async _fetchFrigateCameraListViaWs(token) {
+    if (!this._hass?.connection) return;
+    try {
+      let result = await this._hass.connection.sendMessagePromise({
+        type: "frigate/events/get",
+        instance_id: this._config.frigate_instance_id || "frigate",
+        after: Math.floor(Date.now() / 1000) - 7 * 24 * 3600,
+        before: Math.floor(Date.now() / 1000),
+        limit: 500,
+      });
+      if (typeof result === "string") result = JSON.parse(result);
       if (token !== this._camFetchToken) return;
-      const names = Object.keys(cfg?.cameras || {});
+      if (!Array.isArray(result)) return;
+      const names = [...new Set(result.map((ev) => ev.camera).filter(Boolean))].sort();
       if (!names.length) return;
       this._frigateCameraNames = names;
       this._renderCameraField();
-    } catch (_) {
-      // CORS-blocked or unreachable — the plain text field stays as-is.
+    } catch (err) {
+      console.warn("[frigate-timeline-card] WS camera discovery failed", err);
     }
   }
 
