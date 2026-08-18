@@ -126,6 +126,7 @@ class FrigateTimelineCard extends HTMLElement {
     this._events = [];
     this._fetchKey = null;
     this._resetZoom();
+    this._updateDayNavState();
     if (!this._built) this._build();
   }
 
@@ -256,7 +257,6 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-toolbar {
           display: flex; align-items: center; justify-content: space-between; gap: 8px;
           padding: 6px 8px; background: transparent;
-          border-bottom: 1px solid rgba(127, 127, 127, 0.15);
         }
         frigate-timeline-card .ftc-controlbar { display: flex; align-items: center; gap: 2px; }
         frigate-timeline-card .ftc-ctlbtn {
@@ -284,6 +284,9 @@ class FrigateTimelineCard extends HTMLElement {
           cursor: pointer; padding: 3px 9px; border-radius: 6px;
         }
         frigate-timeline-card .ftc-navbtn:hover { background: rgba(127, 127, 127, 0.15); }
+        frigate-timeline-card .ftc-navbtn:disabled {
+          opacity: 0.3; cursor: default; pointer-events: none;
+        }
         frigate-timeline-card .ftc-timeline { padding: 22px 10px 8px; }
         frigate-timeline-card .ftc-trackwrap { position: relative; }
         frigate-timeline-card .ftc-track {
@@ -341,14 +344,23 @@ class FrigateTimelineCard extends HTMLElement {
     this._trackEl.style.height = `${this._config.height}px`;
     this._buildControlBar();
     this._wireTrackInteraction();
+    this._nextDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="1"]');
     this.querySelectorAll(".ftc-navbtn").forEach((btn) => {
       btn.addEventListener("click", () => {
         this._dayKey = shiftDayKey(this._dayKey, Number(btn.dataset.dir));
         this._resetZoom();
         this._ensureData();
+        this._updateDayNavState();
       });
     });
+    this._updateDayNavState();
     this._showLive();
+  }
+
+  /** Disables "next day" once the viewed day reaches today — there's never
+   * any future data, so stepping past today would just show an empty day. */
+  _updateDayNavState() {
+    if (this._nextDayBtnEl) this._nextDayBtnEl.disabled = this._dayKey >= todayKey();
   }
 
   // ─── Zoom / pan ──────────────────────────────────────────────────────
@@ -1067,24 +1079,74 @@ class FrigateTimelineCardEditor extends HTMLElement {
     if (this._entityPicker) this._entityPicker.hass = hass;
   }
 
+  /**
+   * Plain native `<input>`/`<select>` for every field except the camera
+   * entity picker — deliberately NOT `ha-textfield`/`ha-select`/
+   * `mwc-list-item`. Those are HA/Material Web Components that only render
+   * anything once their custom-element class is registered and upgraded;
+   * until then a raw `<ha-textfield>` tag has no shadow DOM at all, so it's
+   * completely invisible — no box, no label, nothing — not just unstyled.
+   * That's exactly what happened here: `ha-entity-picker` happened to be
+   * registered by the time this editor opened, but the others weren't,
+   * so every field except the camera picker silently failed to render at
+   * all, even though it was correctly present in the DOM the whole time.
+   * Native form elements have no such dependency — guaranteed to render
+   * regardless of what HA's frontend has gotten around to loading yet.
+   */
   _build() {
     this._built = true;
     this.innerHTML = `
-      <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px 16px;">
+      <div class="ftc-ed-form">
         <div id="ftc-ed-entity"></div>
-        <div style="display:flex;gap:8px;">
-          <ha-textfield id="ftc-ed-host" label="Server Frigate (ex: 192.168.1.11)" style="flex:2"></ha-textfield>
-          <ha-textfield id="ftc-ed-port" label="Port" type="number" style="flex:1"></ha-textfield>
+        <div class="ftc-ed-row">
+          <label class="ftc-ed-field" style="flex:2">
+            <span>Server Frigate (ex: 192.168.1.11)</span>
+            <input id="ftc-ed-host" type="text" />
+          </label>
+          <label class="ftc-ed-field" style="flex:1">
+            <span>Port</span>
+            <input id="ftc-ed-port" type="number" />
+          </label>
         </div>
         <div id="ftc-ed-camera-row">
-          <ha-textfield id="ftc-ed-camera" label="Cameră în Frigate (ex: spate)" style="width:100%"></ha-textfield>
+          <label class="ftc-ed-field">
+            <span>Cameră în Frigate (ex: spate)</span>
+            <input id="ftc-ed-camera" type="text" />
+          </label>
         </div>
-        <ha-textfield id="ftc-ed-instance" label="Frigate instance id (implicit: frigate)" style="width:100%"></ha-textfield>
-        <div style="display:flex;gap:8px;">
-          <ha-textfield id="ftc-ed-height" label="Înălțime timeline (px)" type="number" style="flex:1"></ha-textfield>
-          <ha-textfield id="ftc-ed-zoom" label="Zoom implicit (ore)" type="number" style="flex:1"></ha-textfield>
+        <label class="ftc-ed-field">
+          <span>Frigate instance id (implicit: frigate)</span>
+          <input id="ftc-ed-instance" type="text" />
+        </label>
+        <div class="ftc-ed-row">
+          <label class="ftc-ed-field" style="flex:1">
+            <span>Înălțime timeline (px)</span>
+            <input id="ftc-ed-height" type="number" />
+          </label>
+          <label class="ftc-ed-field" style="flex:1">
+            <span>Zoom implicit (ore)</span>
+            <input id="ftc-ed-zoom" type="number" step="0.25" min="0.25" max="24" />
+          </label>
         </div>
       </div>
+      <style>
+        frigate-timeline-card-editor .ftc-ed-form { display: flex; flex-direction: column; gap: 16px; padding: 8px 2px 16px; }
+        frigate-timeline-card-editor .ftc-ed-row { display: flex; gap: 8px; }
+        frigate-timeline-card-editor .ftc-ed-field {
+          display: flex; flex-direction: column; gap: 4px; flex: 1;
+          font-size: 12px; color: var(--secondary-text-color, #999);
+        }
+        frigate-timeline-card-editor .ftc-ed-field input {
+          font: inherit; font-size: 15px; color: var(--primary-text-color, #fff);
+          background: var(--card-background-color, transparent);
+          border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.4));
+          border-radius: 6px; padding: 8px 10px; width: 100%; box-sizing: border-box;
+        }
+        frigate-timeline-card-editor .ftc-ed-field input:focus {
+          outline: none; border-color: var(--primary-color, #03a9f4);
+        }
+        frigate-timeline-card-editor .ftc-ed-field select { font: inherit; }
+      </style>
     `;
     const entityRow = this.querySelector("#ftc-ed-entity");
     const picker = document.createElement("ha-entity-picker");
@@ -1153,16 +1215,16 @@ class FrigateTimelineCardEditor extends HTMLElement {
     const row = this.querySelector("#ftc-ed-camera-row");
     if (!row || !this._frigateCameraNames?.length) return;
     row.innerHTML = `
-      <ha-select id="ftc-ed-camera-select" label="Cameră în Frigate" style="width:100%">
-        ${this._frigateCameraNames
-          .map((n) => `<mwc-list-item value="${n}">${n}</mwc-list-item>`)
-          .join("")}
-      </ha-select>
+      <label class="ftc-ed-field">
+        <span>Cameră în Frigate</span>
+        <select id="ftc-ed-camera-select">
+          ${this._frigateCameraNames.map((n) => `<option value="${n}">${n}</option>`).join("")}
+        </select>
+      </label>
     `;
     const sel = row.querySelector("#ftc-ed-camera-select");
     sel.value = this._config.frigate_camera || "";
-    sel.addEventListener("selected", (e) => this._update("frigate_camera", e.target.value));
-    sel.addEventListener("closed", (e) => e.stopPropagation());
+    sel.addEventListener("change", (e) => this._update("frigate_camera", e.target.value));
   }
 
   _sync() {
