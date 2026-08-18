@@ -261,10 +261,10 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-controlbar { display: flex; align-items: center; gap: 2px; }
         frigate-timeline-card .ftc-ctlbtn {
           display: flex; align-items: center; justify-content: center;
-          background: none; border: none; color: var(--primary-text-color, #fff);
+          background: rgba(127, 127, 127, 0.15); border: none; color: var(--primary-text-color, #fff);
           line-height: 1; cursor: pointer; padding: 6px 8px; border-radius: 6px;
         }
-        frigate-timeline-card .ftc-ctlbtn:hover { background: rgba(127, 127, 127, 0.15); }
+        frigate-timeline-card .ftc-ctlbtn:hover { background: rgba(127, 127, 127, 0.28); }
         frigate-timeline-card .ftc-live-btn {
           display: flex; align-items: center; gap: 5px;
           font-size: 11px; font-weight: 700; letter-spacing: 0.03em; opacity: 0.4;
