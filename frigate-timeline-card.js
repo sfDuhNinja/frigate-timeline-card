@@ -445,9 +445,19 @@ class FrigateTimelineCard extends HTMLElement {
    * the viewed day changes. */
   _resetZoom() {
     this._windowHours = this._defaultZoomHours();
+    this._recenterToNow();
+  }
+
+  /** Repositions `_centerMs` so "now" (or the tail end of the day, on a
+   * past day) sits 10 minutes in from the window's right edge, at
+   * whatever `_windowHours` is currently set to — recentering without
+   * touching zoom. Used by `_resetZoom()` (which also resets the zoom
+   * level) and by `_showLive()` (which deliberately does NOT — jumping
+   * back to live shouldn't discard a zoom level the user picked). */
+  _recenterToNow() {
     const day = dayWindow(this._dayKey);
     const RIGHT_MARGIN_MS = 10 * 60 * 1000;
-    const halfMs = (this._windowHours * 3600000) / 2;
+    const halfMs = ((this._windowHours || this._defaultZoomHours()) * 3600000) / 2;
     const anchorMs = Math.min(Date.now(), day.end);
     this._centerMs = anchorMs + RIGHT_MARGIN_MS - halfMs;
     this._updateZoomLabel();
@@ -906,11 +916,14 @@ class FrigateTimelineCard extends HTMLElement {
     // Returning to live should mean returning to "now" on the timeline too
     // — if the user was browsing a past day, jump the strip back to today
     // rather than leaving it stranded on a day with no live position to
-    // show. Only resets when actually on a different day, so tapping Live
-    // while already on today doesn't disturb the current zoom/pan.
+    // show. Recenters on "now" at whatever zoom level was already set —
+    // deliberately NOT a full _resetZoom(), which would also discard that
+    // zoom level; only day + position should change here. Only runs when
+    // actually on a different day, so tapping Live while already on today
+    // doesn't disturb the current zoom/pan at all.
     if (this._dayKey !== todayKey()) {
       this._dayKey = todayKey();
-      this._resetZoom();
+      this._recenterToNow();
       this._updateDayNavState();
       this._ensureData();
     }
