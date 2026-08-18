@@ -282,7 +282,8 @@ class FrigateTimelineCard extends HTMLElement {
           font-size: 11px; font-weight: 700; letter-spacing: 0.03em; opacity: 0.4;
           text-transform: uppercase; padding: 6px 10px;
         }
-        frigate-timeline-card .ftc-live-btn.active { opacity: 1; }
+        frigate-timeline-card .ftc-live-btn.active,
+        frigate-timeline-card .ftc-live-btn.on-live { opacity: 1; }
         frigate-timeline-card .ftc-live-dot {
           width: 8px; height: 8px; border-radius: 50%; background: #ef4444; flex: none;
         }
