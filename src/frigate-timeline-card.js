@@ -426,7 +426,13 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-navbtn:disabled {
           opacity: 0.3; cursor: default; pointer-events: none;
         }
-        frigate-timeline-card .ftc-timeline { padding: 22px 10px 8px; }
+        /* Extra right padding — the now-pill can sit right at the track's
+           right edge (capped to "now" + 15min on today), and its own
+           translateX(-50%) centering means half its width spills past
+           that edge; without room there it gets clipped by ha-card's
+           overflow:hidden. Left/bottom stay tight since nothing overflows
+           there. */
+        frigate-timeline-card .ftc-timeline { padding: 22px 40px 8px 10px; }
         frigate-timeline-card .ftc-trackwrap { position: relative; }
         frigate-timeline-card .ftc-track {
           position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
