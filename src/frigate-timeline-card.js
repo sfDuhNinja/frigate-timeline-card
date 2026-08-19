@@ -84,6 +84,9 @@ const STALL_RECONNECT_MS = 10000;
 const MAX_LIVE_LAG_SEC = 60;
 /** Minimum spacing between live-edge catch-up passes. */
 const CATCH_UP_INTERVAL_MS = 1000;
+/** Tallest a motion bar gets, as a percentage of the track's height. Kept
+ * well short of full so the activity bands behind it stay readable. */
+const MOTION_MAX_HEIGHT_PCT = 62;
 /** Frigate labels a person "person" and, once the second pass confirms it,
  * "person-verified". Both count, and the check is a substring rather than
  * an equality so a future qualifier doesn't silently stop matching. */
@@ -528,7 +531,7 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-motion {
           position: absolute; top: 50%; transform: translateY(-50%);
           background: var(--frigate-timeline-motion, rgba(255, 255, 255, 0.62));
-          pointer-events: none;
+          border-radius: 1px; pointer-events: none;
         }
         frigate-timeline-card .ftc-now-pill {
           position: absolute; top: -22px; transform: translateX(-50%);
@@ -2298,7 +2301,7 @@ class FrigateTimelineCard extends HTMLElement {
       const step = 100 / buckets;
       for (let i = 0; i < buckets; i++) {
         if (!peaks[i]) continue;
-        const height = Math.max(6, Math.sqrt(peaks[i] / max) * 92);
+        const height = Math.max(6, Math.sqrt(peaks[i] / max) * MOTION_MAX_HEIGHT_PCT);
         html += `<div class="ftc-motion" style="left:${i * step}%;width:${step}%;height:${height}%;"></div>`;
       }
     }
