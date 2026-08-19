@@ -1210,8 +1210,16 @@ class FrigateTimelineCard extends HTMLElement {
       let sourceBuffer = null;
       const queue = [];
       const pump = () => {
-        if (sourceBuffer && !sourceBuffer.updating && queue.length) {
+        // A superseded connection's SourceBuffer can still fire a trailing
+        // `updateend` after a newer _showLive()/_playAt() call has already
+        // torn down the stage — appendBuffer() on it then throws
+        // InvalidStateError. Same token guard as everywhere else.
+        if (token !== this._liveToken) return;
+        if (!sourceBuffer || sourceBuffer.updating || !queue.length) return;
+        try {
           sourceBuffer.appendBuffer(queue.shift());
+        } catch (err) {
+          console.warn("[frigate-timeline-card] appendBuffer failed", err);
         }
       };
 
@@ -1238,6 +1246,7 @@ class FrigateTimelineCard extends HTMLElement {
             const msg = JSON.parse(evt.data);
             if (msg.type === "mse" && !sourceBuffer) {
               const create = () => {
+                if (token !== this._liveToken) return;
                 sourceBuffer = ms.addSourceBuffer(msg.value);
                 sourceBuffer.mode = "segments";
                 sourceBuffer.addEventListener("updateend", pump);
