@@ -1825,6 +1825,9 @@ class FrigateTimelineCard extends HTMLElement {
     const mp4Url = `${base}/${camId}/start/${startSec}/end/${endSec}/clip.mp4`;
 
     const clip = { url: hlsUrl, tsMs, endSec };
+    // Updated once the proxied manifest is known, so the error fallback
+    // retries against that rather than Frigate's own cross-origin URL.
+    let hlsSourceUrl = hlsUrl;
     this._playingClip = clip;
     this._pillMode = "clip";
     this._clipStartSec = startSec;
@@ -1863,7 +1866,7 @@ class FrigateTimelineCard extends HTMLElement {
           return;
         }
         const hls = new window.Hls({ maxBufferLength: 30, backBufferLength: 30 });
-        hls.loadSource(hlsUrl);
+        hls.loadSource(hlsSourceUrl);
         hls.attachMedia(video);
         hls.on(window.Hls.Events.ERROR, (_evt, data) => {
           if (!data?.fatal) return;
@@ -1897,16 +1900,18 @@ class FrigateTimelineCard extends HTMLElement {
     // which never requires a user gesture. Unmuting does, and that is its
     // own later button press.
     //
-    // Through the proxy every browser gets the progressive clip.mp4 —
-    // including the Safari/iOS ones that would otherwise prefer native
-    // HLS. A signed Home Assistant path authorizes exactly one URL, and an
-    // .m3u8's segments are separate URLs the player derives on its own, so
-    // they would arrive unsigned and be rejected. A single signed MP4 URL,
-    // whose range requests reuse that same URL query and all, is the only
-    // shape that survives. The direct URLs remain the fallback for setups
-    // without the Frigate HA integration.
-    this._resolveClipSrc(camId, startSec, endSec, canPlayNativeHls ? hlsUrl : mp4Url).then((src) => {
-      if (this._playingClip === clip) video.src = src;
+    // See _resolveClipSource for why this prefers HLS through the proxy.
+    // Safari plays the manifest natively; everywhere else hls.js takes it,
+    // which is safe here in a way it never was against Frigate directly —
+    // the proxied URL is same-origin, so its XHRs aren't CORS-gated.
+    this._resolveClipSource(camId, startSec, endSec, {
+      url: canPlayNativeHls ? hlsUrl : mp4Url,
+      hls: canPlayNativeHls,
+    }).then((source) => {
+      if (this._playingClip !== clip) return;
+      if (source.hls) hlsSourceUrl = source.url;
+      if (source.hls && !canPlayNativeHls) tryHlsJs();
+      else video.src = source.url;
     });
 
     // Best-effort correction, fired in parallel and never awaited — it only
@@ -1914,16 +1919,40 @@ class FrigateTimelineCard extends HTMLElement {
     this._correctClipStartSec(camId, base, startSec);
   }
 
-  /** Signed same-origin URL for the recorded clip, falling back to the
-   * direct Frigate URL when there is no Home Assistant connection to sign
-   * with (or the integration isn't installed). See _playAt for why this is
-   * the MP4 endpoint rather than the HLS one. */
-  async _resolveClipSrc(camId, startSec, endSec, directUrl) {
-    const signed = await this._signHaPath(
-      `${this._frigateProxyPath()}/recording/${encodeURIComponent(camId)}/start/${startSec}/end/${endSec}`,
-      3600
-    );
-    return signed || directUrl;
+  /**
+   * Where to load a clip from, best option first.
+   *
+   * HLS through Home Assistant's VOD proxy is the primary path, and the
+   * reason is Safari: Frigate generates `clip.mp4` on the fly and answers a
+   * `Range` request with a plain 200 and no `Accept-Ranges` (verified
+   * against both Frigate directly and the proxy), and Safari refuses a
+   * progressive MP4 it cannot range-request — `MEDIA_ERR_SRC_NOT_SUPPORTED`,
+   * with nothing in the network log to explain it. Routing every browser to
+   * the signed MP4 is what broke clip playback there.
+   *
+   * The reason it was routed that way is a mistake worth naming: a signed
+   * Home Assistant path authorizes exactly one URL, and an .m3u8's segments
+   * are separate URLs the player derives itself, so they looked like they
+   * would arrive unsigned. They don't. The Frigate integration rewrites the
+   * manifest as it proxies it, appending the same `authSig` to every
+   * segment and to the init map — confirmed by reading a proxied manifest
+   * and fetching a segment straight out of it. Signing the manifest is
+   * enough.
+   *
+   * Which also means clips stream segment by segment now instead of
+   * arriving as one unranged blob — 85 MB in a single response for one
+   * minute of this setup's main stream.
+   */
+  async _resolveClipSource(camId, startSec, endSec, fallback) {
+    const proxy = this._frigateProxyPath();
+    const camera = encodeURIComponent(camId);
+    const m3u8 = await this._signHaPath(`${proxy}/vod/${camera}/start/${startSec}/end/${endSec}/index.m3u8`, 3600);
+    if (m3u8) return { url: m3u8, hls: true };
+    // No manifest to be had — the MP4 proxy still works anywhere that
+    // tolerates a source it can't range-request.
+    const mp4 = await this._signHaPath(`${proxy}/recording/${camera}/start/${startSec}/end/${endSec}`, 3600);
+    if (mp4) return { url: mp4, hls: false };
+    return fallback;
   }
 
   /**
