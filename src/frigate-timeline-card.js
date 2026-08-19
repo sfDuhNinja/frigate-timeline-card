@@ -87,6 +87,8 @@ const CATCH_UP_INTERVAL_MS = 1000;
 /** Tallest a motion bar gets, as a percentage of the track's height. Kept
  * well short of full so the activity bands behind it stay readable. */
 const MOTION_MAX_HEIGHT_PCT = 62;
+/** How much footage one clip request covers, forward from the tap. */
+const CLIP_WINDOW_SEC = 60;
 /** Frigate labels a person "person" and, once the second pass confirms it,
  * "person-verified". Both count, and the check is a substring rather than
  * an equality so a future qualifier doesn't silently stop matching. */
@@ -1808,16 +1810,18 @@ class FrigateTimelineCard extends HTMLElement {
     const camId = this._cameraObjectId();
     const base = this._config.frigate_url.replace(/\/+$/, "");
     const nowSec = Math.floor(Date.now() / 1000);
-    // A tap gets a short run-up so the moment you aimed at isn't already
-    // gone by the time the picture appears. A chunk continuing from the
-    // previous one must not rewind — it starts exactly where that ended.
+    // Playback begins at the tap, with no run-up. A tap used to rewind 20
+    // seconds so you'd catch the lead-up to an event, but the selector
+    // rewound with it: tap a bar, watch the pill jump backwards off the
+    // thing you just aimed at and creep back over the next 20 seconds.
+    // "Play from the selector" has to mean the selector.
     const wasMuted = this._streamEl?.muted;
-    let startSec = Math.floor(tsMs / 1000) - (continuous ? 0 : 20);
+    let startSec = Math.floor(tsMs / 1000);
     // Clamp the end a few seconds behind "now" — Frigate needs a moment to
     // finalize very recent segments, and asking for a range that partly
     // doesn't exist yet is exactly what made playback choppy/stuck when
     // tapping near the live edge of the timeline.
-    let endSec = Math.min(Math.floor(tsMs / 1000) + 40, nowSec - 5);
+    let endSec = Math.min(startSec + CLIP_WINDOW_SEC, nowSec - 5);
     if (endSec <= startSec) endSec = startSec + 15;
     const hlsUrl = `${base}/vod/${camId}/start/${startSec}/end/${endSec}/index.m3u8`;
     const mp4Url = `${base}/${camId}/start/${startSec}/end/${endSec}/clip.mp4`;
