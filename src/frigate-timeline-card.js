@@ -89,6 +89,11 @@ const CATCH_UP_INTERVAL_MS = 1000;
 const MOTION_MAX_HEIGHT_PCT = 62;
 /** How much footage one clip request covers, forward from the tap. */
 const CLIP_WINDOW_SEC = 60;
+/** Room kept to the right of "now" so its pill sits inside the strip
+ * rather than hanging off the end. In pixels, converted to time per zoom
+ * level: a fixed number of minutes is a different amount of screen at
+ * every zoom, which is what left the pill overflowing at a day's width. */
+const NOW_RIGHT_MARGIN_PX = 48;
 /** Frigate labels a person "person" and, once the second pass confirms it,
  * "person-verified". Both count, and the check is a substring rather than
  * an equality so a future qualifier doesn't silently stop matching. */
@@ -509,13 +514,11 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-navbtn:disabled {
           opacity: 0.3; cursor: default; pointer-events: none;
         }
-        /* Extra right padding — the now-pill can sit right at the track's
-           right edge (capped to "now" + 15min on today), and its own
-           translateX(-50%) centering means half its width spills past
-           that edge; without room there it gets clipped by ha-card's
-           overflow:hidden. Left/bottom stay tight since nothing overflows
-           there. */
-        frigate-timeline-card .ftc-timeline { padding: 22px 40px 8px 10px; }
+        /* Even left and right, so the strip sits square in the card. The
+           room the now-pill needs is made in the *window* instead — see
+           NOW_RIGHT_MARGIN_PX — which keeps it clear of the edge at every
+           zoom level, where the old lopsided padding only worked at some. */
+        frigate-timeline-card .ftc-timeline { padding: 22px 10px 8px 10px; }
         frigate-timeline-card .ftc-trackwrap { position: relative; }
         frigate-timeline-card .ftc-track {
           position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
@@ -614,14 +617,28 @@ class FrigateTimelineCard extends HTMLElement {
 
   // ─── Zoom / pan ──────────────────────────────────────────────────────
 
+  /** `NOW_RIGHT_MARGIN_PX` worth of time at the current zoom. */
+  _nowMarginMs(spanMs) {
+    const width = Math.round(this._trackEl?.clientWidth) || 300;
+    return (spanMs / width) * NOW_RIGHT_MARGIN_PX;
+  }
+
   _currentWindow() {
     const day = dayWindow(this._dayKey);
     if (!day) return { start: 0, end: 1 };
-    // Never show more than 15 minutes of "future" past now on today — that
-    // stretch is always empty (no data past now), so letting the window
-    // extend toward midnight just wastes screen space. Zoom/pan/reset all
-    // funnel through here, so the cap holds everywhere, not just on load.
-    const dayEnd = this._dayKey === todayKey() ? Math.min(day.end, Date.now() + 15 * 60 * 1000) : day.end;
+    // Today stops just past now rather than running on to midnight — that
+    // stretch is always empty. The margin is only what the pill needs to
+    // sit clear of the edge. Zoom/pan/reset all funnel through here, so it
+    // holds everywhere, not just on load.
+    // The margin is measured against the span actually on screen. Fully
+    // zoomed out early in the day that is a few hours, not twenty-four —
+    // sizing it off the nominal day would reserve hours of empty strip.
+    const referenceSpan =
+      this._windowHours && this._windowHours < 24
+        ? this._windowHours * 3600000
+        : Math.max(3600000, Math.min(day.end, Date.now()) - day.start);
+    const dayEnd =
+      this._dayKey === todayKey() ? Math.min(day.end, Date.now() + this._nowMarginMs(referenceSpan)) : day.end;
     if (!this._windowHours || this._windowHours >= 24) return { start: day.start, end: dayEnd };
     const half = (this._windowHours * 3600000) / 2;
     const center = this._centerMs ?? day.start + (dayEnd - day.start) / 2;
@@ -650,11 +667,10 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   /** Resets to the configured default zoom window (10h unless overridden).
-   * "Now" (or the tail end of the day, when browsing a past day) sits 10
-   * minutes in from the window's right edge — not centered — so the window
-   * reads mostly as "what just happened", with a small margin rather than
-   * "now" pinned exactly at the edge. Called on initial load and whenever
-   * the viewed day changes. */
+   * "Now" (or the tail end of the day, when browsing a past day) sits just
+   * in from the window's right edge rather than centred, so the strip reads
+   * mostly as "what just happened". Called on load, on a day change, and on
+   * an explicit Live press. */
   _resetZoom() {
     this._windowHours = this._defaultZoomHours();
     this._recenterToNow();
@@ -664,14 +680,14 @@ class FrigateTimelineCard extends HTMLElement {
    * past day) sits 10 minutes in from the window's right edge, at
    * whatever `_windowHours` is currently set to — recentering without
    * touching zoom. Used by `_resetZoom()` (which also resets the zoom
-   * level) and by `_showLive()` (which deliberately does NOT — jumping
+   * level) and by `_showLive()` on an explicit Live press (jumping
    * back to live shouldn't discard a zoom level the user picked). */
   _recenterToNow() {
     const day = dayWindow(this._dayKey);
-    const RIGHT_MARGIN_MS = 10 * 60 * 1000;
-    const halfMs = ((this._windowHours || this._defaultZoomHours()) * 3600000) / 2;
+    const spanMs = (this._windowHours || this._defaultZoomHours()) * 3600000;
+    const halfMs = spanMs / 2;
     const anchorMs = Math.min(Date.now(), day.end);
-    this._centerMs = anchorMs + RIGHT_MARGIN_MS - halfMs;
+    this._centerMs = anchorMs + this._nowMarginMs(spanMs) - halfMs;
     this._updateZoomLabel();
     this._renderTimeline();
   }
@@ -1063,7 +1079,7 @@ class FrigateTimelineCard extends HTMLElement {
     liveBtn.className = "ftc-ctlbtn ftc-live-btn";
     liveBtn.innerHTML = `<span class="ftc-live-dot"></span>${this._t("live")}`;
     liveBtn.title = this._t("backToLive");
-    liveBtn.addEventListener("click", () => this._showLive());
+    liveBtn.addEventListener("click", () => this._showLive({ resetView: true }));
 
     bar.append(playBtn, muteBtn, fsBtn, liveBtn);
     this._playBtnEl = playBtn;
@@ -1237,7 +1253,7 @@ class FrigateTimelineCard extends HTMLElement {
    *     plain http/LAN-only, where it avoids HA's WebRTC bridge as an
    *     extra hop/point of failure.
    */
-  async _showLive() {
+  async _showLive({ resetView = false } = {}) {
     // _build() calls _showLive() once at the end, unconditionally — before
     // `hass` has ever been set (setConfig()/_build() run synchronously,
     // hass arrives from the platform afterward). The ha-camera-stream path
@@ -1252,19 +1268,17 @@ class FrigateTimelineCard extends HTMLElement {
     if (!this._hass) return;
     this._playingClip = null;
     this._pillMode = "live";
-    // Returning to live should mean returning to "now" on the timeline too
-    // — if the user was browsing a past day, jump the strip back to today
-    // rather than leaving it stranded on a day with no live position to
-    // show. Recenters on "now" at whatever zoom level was already set —
-    // deliberately NOT a full _resetZoom(), which would also discard that
-    // zoom level; only day + position should change here. Only runs when
-    // actually on a different day, so tapping Live while already on today
-    // doesn't disturb the current zoom/pan at all.
-    if (this._dayKey !== todayKey()) {
+    // Pressing Live puts the strip back to its starting state: today, at
+    // the configured zoom, centred on now. Only when actually pressed —
+    // _showLive() is also how the card starts up and how it comes back
+    // from the background, and resetting someone's zoom every time they
+    // switch apps would be its own bug.
+    if (resetView) {
       this._dayKey = todayKey();
-      this._recenterToNow();
+      this._resetZoom();
       this._updateDayNavState();
       this._ensureData();
+      this._ensureRecordings();
     }
     const token = (this._liveToken = (this._liveToken || 0) + 1);
     this._teardownWebRtc();
