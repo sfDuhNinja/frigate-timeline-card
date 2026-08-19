@@ -1317,14 +1317,22 @@ class FrigateTimelineCard extends HTMLElement {
         let sourceBuffer = null;
         let gotData = false;
         const queue = [];
+        // Set the moment this attempt stops being the live one. Every
+        // reconnect assigns a fresh `video.src`, which detaches the previous
+        // MediaSource and removes its SourceBuffer — and a removed
+        // SourceBuffer throws InvalidStateError from *every* member,
+        // `.updating` and `.buffered` included, not just appendBuffer(). Its
+        // `updateend` listeners are still attached and still fire, so
+        // without this flag the previous attempt's handlers keep running
+        // against a dead object and throw on the way in. The `token` guard
+        // alone can't cover it: token only changes on _showLive()/_playAt(),
+        // never between retries of the same live view.
+        let cancelled = false;
+
         const pump = () => {
-          // A superseded connection's SourceBuffer can still fire a
-          // trailing `updateend` after a newer connect()/_showLive() call
-          // has already torn down the stage — appendBuffer() on it then
-          // throws InvalidStateError. Same token guard as everywhere else.
-          if (token !== this._liveToken) return;
-          if (!sourceBuffer || sourceBuffer.updating || !queue.length) return;
+          if (cancelled || token !== this._liveToken) return;
           try {
+            if (!sourceBuffer || sourceBuffer.updating || !queue.length) return;
             sourceBuffer.appendBuffer(queue.shift());
           } catch (err) {
             console.warn("[frigate-timeline-card] appendBuffer failed", err);
@@ -1368,10 +1376,17 @@ class FrigateTimelineCard extends HTMLElement {
         // Infinity duration a live stream should report anyway is what lets
         // the trim itself succeed.
         const catchUpToLiveEdge = () => {
-          if (token !== this._liveToken || !sourceBuffer || sourceBuffer.updating) return;
-          const buffered = sourceBuffer.buffered;
-          if (!buffered?.length) return;
-          const end = buffered.end(buffered.length - 1);
+          if (cancelled || token !== this._liveToken || !sourceBuffer) return;
+          let buffered;
+          let end;
+          try {
+            if (sourceBuffer.updating) return;
+            buffered = sourceBuffer.buffered;
+            if (!buffered?.length) return;
+            end = buffered.end(buffered.length - 1);
+          } catch (_) {
+            return; // detached SourceBuffer — this attempt is over
+          }
           try {
             if (Number.isNaN(ms.duration) && ms.readyState === "open") ms.duration = Infinity;
             const start0 = buffered.start(0);
@@ -1398,6 +1413,22 @@ class FrigateTimelineCard extends HTMLElement {
         this._rtcWebSocket = ws;
         let openedAt = 0;
 
+        // Detaches this attempt's handlers. Called before anything replaces
+        // the element's source, so the SourceBuffer we are about to lose
+        // stops receiving events we would then have to defend against.
+        const teardownAttempt = () => {
+          if (cancelled) return;
+          cancelled = true;
+          queue.length = 0;
+          video.removeEventListener("error", onMediaError);
+          try {
+            sourceBuffer?.removeEventListener("updateend", pump);
+            sourceBuffer?.removeEventListener("updateend", catchUpToLiveEdge);
+          } catch (_) {
+            /* already detached */
+          }
+        };
+
         // A decode error kills the element for good — `readyState` drops
         // back to HAVE_METADATA and no further append changes anything, so
         // the card just sits black with the WebSocket still happily
@@ -1405,9 +1436,17 @@ class FrigateTimelineCard extends HTMLElement {
         // only recovery path was ws.onclose, and the socket never closed.
         // Routing it through a non-1000 close reuses that one retry path,
         // which rebuilds the MediaSource from a fresh init segment.
+        //
+        // Only decode and network failures qualify. MEDIA_ERR_ABORTED is
+        // what the element reports when its own source is replaced — which
+        // is exactly what the reconnect does — so treating that as a reason
+        // to reconnect is a loop that never lets any attempt finish.
         const onMediaError = () => {
-          if (token !== this._liveToken) return;
+          const code = video.error?.code;
+          if (code !== 3 /* MEDIA_ERR_DECODE */ && code !== 2 /* MEDIA_ERR_NETWORK */) return;
+          if (cancelled || token !== this._liveToken) return;
           console.warn("[frigate-timeline-card] live <video> error — reconnecting", video.error);
+          teardownAttempt();
           try {
             ws.close(4001);
           } catch (_) {
@@ -1498,7 +1537,7 @@ class FrigateTimelineCard extends HTMLElement {
           if (token === this._liveToken) console.warn("[frigate-timeline-card] go2rtc MSE WS error");
         };
         ws.onclose = (e) => {
-          video.removeEventListener("error", onMediaError);
+          teardownAttempt();
           if (e.code === 1000 || token !== this._liveToken) return;
           console.warn(`[frigate-timeline-card] go2rtc MSE WS closed unexpectedly (code ${e.code})`, {
             attempt,
