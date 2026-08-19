@@ -49,6 +49,7 @@ A visual editor is also available (entity picker + form fields) when adding the 
 | `live_source` | no | `ha` | `ha` uses `ha-camera-stream`; `frigate` uses Frigate's own go2rtc over MSE (WebSocket-delivered fMP4 — more tolerant of tunneled paths like Tailscale than WebRTC's real-time UDP), reached through the Frigate integration's proxy so it stays same-origin with the dashboard |
 | `go2rtc_url` | no | Frigate host on port `1984` | Only used when `live_source: frigate`, and only needed for a go2rtc that isn't the one Frigate bundles. Setting it forces a direct browser→go2rtc connection instead of Home Assistant's proxy, which then has to be reachable from every device and breaks on https dashboards if it isn't TLS itself |
 | `frigate_stream` | no | `main` | Only used when `live_source: frigate`; which go2rtc stream to use, `main` (full quality) or `sub` (lighter) |
+| `show_motion` | no | `true` | Draw the white motion histogram behind the activity bands |
 
 ## Why this exists
 
@@ -57,6 +58,18 @@ Most Frigate/camera Lovelace cards bundle a full media gallery, thumbnails, PTZ,
 ## License
 
 MIT
+
+## Timeline
+
+The strip is layered the way Frigate's own timeline reads:
+
+- **White histogram** — motion, from each recording segment's `motion` score. Bar height is the loudest score in that column, square-rooted and scaled against the loudest score *in the visible window*, so zooming into a quiet stretch opens up its detail instead of flattening it against an unrelated peak elsewhere in the day.
+- **Amber band** — a review segment: Frigate decided something happened here.
+- **Red band** — the same, but a person was in it.
+
+Red tracks people rather than Frigate's `alert` severity, because the two are not the same thing. Over a measured day on a three-camera setup, 97 review segments contained a person but only 68 were alerts — a severity-driven red would have missed 29 of them — while 34 alerts were cats.
+
+Set `show_motion: false` to drop the histogram. Colors are theme variables: `--frigate-timeline-motion`, `--frigate-timeline-detect`, `--frigate-timeline-alert`.
 
 ## Resource use
 

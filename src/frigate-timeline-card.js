@@ -2,10 +2,13 @@
  * frigate-timeline-card
  *
  * Minimal Home Assistant Lovelace card: live camera view plus a horizontal
- * Frigate-style event timeline below it (gold = detection, red = alert,
- * live-updating "now" pill), matching Frigate's own colors. Click/drag the
- * timeline to play the nearest ~1min of recorded footage inline; a "Live"
- * button returns to the live stream.
+ * Frigate-style event timeline below it. The strip is layered the way
+ * Frigate's own timeline reads: translucent bands mark where activity
+ * happened — red where a person was, amber otherwise — and a white
+ * histogram over them shows how much motion, drawn from the per-segment
+ * motion scores. A live-updating "now" pill tracks the present. Click/drag
+ * the timeline to play the nearest ~1min of recorded footage inline; a
+ * "Live" button returns to the live stream.
  *
  * Live view uses `<ha-camera-stream>` bound to `camera_entity` — same
  * element, same setup, as the companion camera-gallery-card fork's
@@ -13,7 +16,7 @@
  * `frigate_camera` (Frigate's own camera name, not the HA entity), fetched
  * WebSocket-first through Home Assistant (`frigate/events/get`), same
  * priority order as that fork, with REST to `frigate_url` as a secondary
- * enhancement (exact severity from /api/review has no WS equivalent).
+ * enhancement where REST happens to be reachable.
  *
  * Why everything goes through Home Assistant rather than straight to
  * Frigate's LAN address: this card originally tried exactly that (raw
@@ -64,6 +67,7 @@
  *   frigate_camera: spate                   # required — Frigate's own camera name, for scoping events/review data
  *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id, for the events WS call (default "frigate")
  *   height: 44                              # optional — timeline strip height in px
+ *   show_motion: true                       # optional — draw the white motion histogram behind the activity bands (default true)
  *   default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default 10)
  *   auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default 0 = disabled)
  *   live_source: ha                         # optional — "ha" (default, via ha-camera-stream) or "frigate" (go2rtc MSE through HA's Frigate proxy, bypassing HA's WebRTC bridge)
@@ -80,20 +84,11 @@ const STALL_RECONNECT_MS = 10000;
 const MAX_LIVE_LAG_SEC = 60;
 /** Minimum spacing between live-edge catch-up passes. */
 const CATCH_UP_INTERVAL_MS = 1000;
-const ALERT_LABEL_RE = /^(person|car)(-verified)?$|-verified$/;
-const ALERT_SCORE_THRESHOLD = 0.7;
-
-function approximateSeverity(ev) {
-  const label = String(ev?.label ?? "").toLowerCase();
-  const score = Number(ev?.top_score ?? ev?.score ?? 0);
-  // Person events always render red/alert, matching Frigate's own timeline
-  // — regardless of confidence score or verified status, unlike other
-  // labels (car, etc.) which still need a verified/high-confidence hit.
-  if (label === "person" || label === "person-verified") return "alert";
-  if (ALERT_LABEL_RE.test(label) && (label.endsWith("-verified") || score >= ALERT_SCORE_THRESHOLD)) {
-    return "alert";
-  }
-  return "detection";
+/** Frigate labels a person "person" and, once the second pass confirms it,
+ * "person-verified". Both count, and the check is a substring rather than
+ * an equality so a future qualifier doesn't silently stop matching. */
+function hasPerson(labels) {
+  return (labels || []).some((l) => String(l || "").toLowerCase().includes("person"));
 }
 
 // Minimal inline icon set (Material Design icon paths) — no emoji anywhere
@@ -263,11 +258,13 @@ class FrigateTimelineCard extends HTMLElement {
     if (config.live_source !== "frigate" && !config.camera_entity) {
       throw new Error("frigate-timeline-card: 'camera_entity' is required (for live view via ha-camera-stream)");
     }
-    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "main", ...config };
+    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "main", show_motion: true, ...config };
     this._dayKey = todayKey();
     this._segments = [];
     this._events = [];
+    this._motion = [];
     this._fetchKey = null;
+    this._motionKey = null;
     this._resetZoom();
     this._updateDayNavState();
     if (!this._built) this._build();
@@ -519,18 +516,19 @@ class FrigateTimelineCard extends HTMLElement {
           position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
           background: #141414; touch-action: none;
         }
-        frigate-timeline-card .ftc-bar {
+        frigate-timeline-card .ftc-band {
+          position: absolute; top: 0; bottom: 0; pointer-events: none;
+        }
+        frigate-timeline-card .ftc-band.plain {
+          background: var(--frigate-timeline-detect, rgba(242, 182, 50, 0.34));
+        }
+        frigate-timeline-card .ftc-band.person {
+          background: var(--frigate-timeline-alert, rgba(239, 68, 68, 0.55));
+        }
+        frigate-timeline-card .ftc-motion {
           position: absolute; top: 50%; transform: translateY(-50%);
-          height: 55%; min-width: 2px; border-radius: 2px; pointer-events: none;
-        }
-        frigate-timeline-card .ftc-bar.detect {
-          background: var(--frigate-timeline-detect, #f2b632);
-          box-shadow: 0 0 4px rgba(242, 182, 50, 0.5);
-        }
-        frigate-timeline-card .ftc-bar.alert {
-          height: 85%;
-          background: var(--frigate-timeline-alert, #ef4444);
-          box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+          background: var(--frigate-timeline-motion, rgba(255, 255, 255, 0.62));
+          pointer-events: none;
         }
         frigate-timeline-card .ftc-now-pill {
           position: absolute; top: -22px; transform: translateX(-50%);
@@ -580,7 +578,17 @@ class FrigateTimelineCard extends HTMLElement {
     this._wireAutoHide();
     this._prevDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="-1"]');
     this._nextDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="1"]');
-    this.querySelectorAll(".ftc-navbtn").forEach((btn) => {
+    // `[data-dir]` is load-bearing, not decoration. The timeline's
+    // collapse chevron is styled as a `.ftc-navbtn` too and is appended to
+    // this same row by _buildControlBar(), which runs just above — so a
+    // bare `.ftc-navbtn` selector picked it up and gave it the day-shift
+    // handler on top of its own. `Number(undefined)` is NaN, which walks
+    // straight through shiftDayKey into `new Date(y, m - 1, NaN)` and comes
+    // back out as the string "NaN-NaN-NaN". Every tap on the chevron then
+    // refetched with `after=NaN&before=NaN`, which Home Assistant rejects
+    // and Frigate never sees, leaving the timeline blank until the day
+    // changed.
+    this.querySelectorAll(".ftc-navbtn[data-dir]").forEach((btn) => {
       btn.addEventListener("click", () => {
         this._dayKey = shiftDayKey(this._dayKey, Number(btn.dataset.dir));
         this._resetZoom();
@@ -1098,6 +1106,9 @@ class FrigateTimelineCard extends HTMLElement {
     this._timelineEl.style.display = hidden ? "none" : "";
     if (this._timelineToggleBtn) this._timelineToggleBtn.innerHTML = hidden ? ICON_CHEVRON_DOWN : ICON_CHEVRON_UP;
     if (userInitiated) this._scheduleAutoHide();
+    // The motion layer is deliberately not fetched while collapsed; this is
+    // where that debt comes due.
+    if (!hidden) this._ensureMotion();
   }
 
   /** Restarts the auto-hide countdown (config `auto_hide_seconds`, 0 =
@@ -1990,6 +2001,12 @@ class FrigateTimelineCard extends HTMLElement {
   async _ensureData() {
     const base = this._config.frigate_url.replace(/\/+$/, "");
     const win = dayWindow(this._dayKey);
+    // Nothing downstream can do anything useful with a broken day, and a
+    // NaN window otherwise reaches the network as `after=NaN&before=NaN`.
+    if (!Number.isFinite(win.start) || !Number.isFinite(win.end)) {
+      console.warn("[frigate-timeline-card] refusing to fetch for an invalid day", this._dayKey);
+      return;
+    }
     const key = `${base}|${this._dayKey}|${this._config.frigate_camera || ""}`;
     if (this._fetchKey === key) return;
     this._fetchKey = key;
@@ -2031,8 +2048,8 @@ class FrigateTimelineCard extends HTMLElement {
       }
     }
 
-    // Review data (exact per-segment severity, which the event list can
-    // only approximate). Same WS-first priority as events above:
+    // Review data — the activity blocks the timeline draws its bands
+    // from. Same WS-first priority as events above:
     // `frigate/reviews/get` goes through Home Assistant's own connection,
     // so it is reachable however the dashboard itself is being served.
     //
@@ -2043,7 +2060,7 @@ class FrigateTimelineCard extends HTMLElement {
     // sends no `Access-Control-Allow-Origin` on /api/review, so every load
     // of this card spent a request getting CORS-blocked (a red console
     // error per card, per day-window) and then silently fell back to
-    // approximating severity from labels.
+    // deriving the bands from the raw event list.
     let reviews = null;
     if (this._hass?.connection) {
       try {
@@ -2080,19 +2097,91 @@ class FrigateTimelineCard extends HTMLElement {
         .map((r) => ({
           start: Number(r.start_time) * 1000,
           end: Number.isFinite(Number(r.end_time)) ? Number(r.end_time) * 1000 : Date.now(),
-          severity: r.severity === "alert" ? "alert" : "detection",
+          // Red means a person was there, which is not the same thing as
+          // Frigate's own `alert` severity and is the more useful of the
+          // two to be able to spot. Measured against a day of this setup's
+          // data: 97 review segments contained a person but only 68 were
+          // alerts, so a severity-driven red would have missed 29 of them
+          // outright — while 34 alerts were cats, which would have been
+          // red for no reason. Severity still decides nothing else here;
+          // everything without a person reads as ordinary activity.
+          person: hasPerson(r.data?.objects),
         }));
     } else {
       // No REST review data (CORS-blocked or Frigate unreachable directly) —
-      // approximate severity from the event list instead, whichever source
-      // it came from.
+      // fall back to the raw event list — it has no notion of a review
+      // segment, but it still knows what was seen and when.
       this._segments = this._events.map((ev) => {
         const startMs = Number(ev.start_time) * 1000;
         const endSec = Number(ev.end_time);
         const endMs = Number.isFinite(endSec) ? endSec * 1000 : startMs + 10000;
-        return { start: startMs, end: endMs, severity: approximateSeverity(ev) };
+        return { start: startMs, end: endMs, person: hasPerson([ev.label, ev.sub_label]) };
       });
     }
+    this._renderTimeline();
+    this._ensureMotion();
+  }
+
+  /**
+   * Motion comes from the recording segments, not from review data:
+   * Frigate stopped emitting a `significant_motion` severity, so a review
+   * segment is only ever a detection or an alert. Each ~10s recording
+   * segment instead carries a `motion` score, which is exactly what
+   * Frigate's own timeline draws its motion histogram from.
+   *
+   * Frigate only writes a segment where something happened, so a day is
+   * thousands of them rather than the 8640 a continuous recording would
+   * give: measured here, 4100–5400 per camera per day, 660–860 KiB of
+   * JSON. Enough to be worth not fetching until the timeline is actually
+   * on screen — with `auto_hide_seconds` set, it spends most of its life
+   * collapsed — and enough to be worth its own cache key, so expanding the
+   * strip doesn't re-fetch the events and reviews alongside it.
+   */
+  async _ensureMotion() {
+    if (this._config.show_motion === false || this._timelineHidden) return;
+    const win = dayWindow(this._dayKey);
+    if (!Number.isFinite(win.start)) return;
+    const camId = this._cameraObjectId();
+    const key = `${this._dayKey}|${camId}`;
+    if (this._motionKey === key) return;
+    this._motionKey = key;
+
+    const afterSec = Math.floor(win.start / 1000);
+    const beforeSec = Math.ceil(win.end / 1000);
+    let segments = null;
+    if (this._hass?.connection) {
+      try {
+        let ws = await this._hass.connection.sendMessagePromise({
+          type: "frigate/recordings/get",
+          instance_id: this._config.frigate_instance_id,
+          camera: camId,
+          after: afterSec,
+          before: beforeSec,
+        });
+        if (typeof ws === "string") ws = JSON.parse(ws);
+        if (Array.isArray(ws)) segments = ws;
+      } catch (err) {
+        console.warn("[frigate-timeline-card] WS frigate/recordings/get failed", err);
+      }
+    }
+    if (!Array.isArray(segments)) {
+      try {
+        const base = this._config.frigate_url.replace(/\/+$/, "");
+        const res = await fetch(`${base}/${camId}/recordings?after=${afterSec}&before=${beforeSec}`);
+        if (res.ok) segments = await res.json();
+      } catch (err) {
+        console.warn("[frigate-timeline-card] recordings unavailable — no motion layer", err);
+      }
+    }
+    if (this._motionKey !== key) return; // superseded
+    this._motion = (Array.isArray(segments) ? segments : [])
+      .filter((seg) => Number.isFinite(Number(seg.start_time)))
+      .map((seg) => ({
+        start: Number(seg.start_time) * 1000,
+        end: Number.isFinite(Number(seg.end_time)) ? Number(seg.end_time) * 1000 : Number(seg.start_time) * 1000 + 10000,
+        score: Number(seg.motion) || 0,
+      }))
+      .filter((seg) => seg.score > 0);
     this._renderTimeline();
   }
 
@@ -2136,25 +2225,56 @@ class FrigateTimelineCard extends HTMLElement {
     const span = win.end - win.start;
     if (!(span > 0)) return;
 
-    // Histogram-style marks (like the reference UI): a thin bar per event,
-    // gold for a plain detection, taller/red for an alert. No filler block
-    // for empty stretches — the dark track itself reads as "nothing here".
-    let barsHtml = "";
-    for (const s of this._segments) {
-      const st = Math.max(s.start, win.start);
-      const en = Math.min(s.end, win.end);
-      if (en <= st) continue;
-      const left = ((st - win.start) / span) * 100;
-      const width = Math.max(((en - st) / span) * 100, 0.15);
-      const cls = s.severity === "alert" ? "alert" : "detect";
-      // Trim a fixed couple of px off each bar's width (not a % — stays a
-      // constant, barely-there gap at any zoom level) so back-to-back
-      // events read as distinct bars, matching Frigate's own timeline,
-      // instead of fusing into one indistinguishable block when they
-      // happen to touch or nearly touch in time.
-      barsHtml += `<div class="ftc-bar ${cls}" style="left:${left}%;width:max(1px, calc(${width}% - 2px));"></div>`;
+    // Laid out the way Frigate's own timeline reads: review segments are
+    // translucent full-height bands marking *where* something happened,
+    // and motion is a histogram of *how much*, drawn over them. Painted
+    // back to front — ordinary activity, then person bands over it, then
+    // the motion histogram on top, since burying the histogram under a
+    // band would hide the only layer carrying detail.
+    let html = "";
+    for (const pass of ["plain", "person"]) {
+      for (const seg of this._segments) {
+        if ((pass === "person") !== !!seg.person) continue;
+        const st = Math.max(seg.start, win.start);
+        const en = Math.min(seg.end, win.end);
+        if (en <= st) continue;
+        const left = ((st - win.start) / span) * 100;
+        const width = Math.max(((en - st) / span) * 100, 0.15);
+        html += `<div class="ftc-band ${pass}" style="left:${left}%;width:max(2px, ${width}%);"></div>`;
+      }
     }
-    this._trackEl.innerHTML = barsHtml;
+
+    if (this._config.show_motion !== false && this._motion?.length) {
+      // One bar per pixel of track, carrying the loudest score that falls
+      // in it. A day is thousands of segments against a few hundred pixels
+      // — without bucketing they would be sub-pixel slivers fighting over
+      // the same column, thousands of DOM nodes for a picture no different
+      // from this one.
+      const buckets = Math.max(60, Math.min(600, Math.round(this._trackEl.clientWidth) || 300));
+      const peaks = new Float64Array(buckets);
+      let max = 0;
+      for (const m of this._motion) {
+        if (m.end <= win.start || m.start >= win.end) continue;
+        const from = Math.max(0, Math.floor(((m.start - win.start) / span) * buckets));
+        const to = Math.min(buckets - 1, Math.floor(((m.end - win.start) / span) * buckets));
+        for (let i = from; i <= to; i++) {
+          if (m.score > peaks[i]) peaks[i] = m.score;
+        }
+        if (m.score > max) max = m.score;
+      }
+      // Scaled against the loudest score *in view*, so zooming into a quiet
+      // stretch opens its detail up instead of flattening it against some
+      // unrelated peak elsewhere in the day. Square-rooted because the
+      // scores are wildly uneven — 1 to over a thousand on these cameras —
+      // and a linear scale leaves everything ordinary invisible.
+      const step = 100 / buckets;
+      for (let i = 0; i < buckets; i++) {
+        if (!peaks[i]) continue;
+        const height = Math.max(6, Math.sqrt(peaks[i] / max) * 92);
+        html += `<div class="ftc-motion" style="left:${i * step}%;width:${step}%;height:${height}%;"></div>`;
+      }
+    }
+    this._trackEl.innerHTML = html;
     this._updateNowPill();
 
     let ticksHtml = "";
