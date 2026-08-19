@@ -1253,6 +1253,35 @@ class FrigateTimelineCard extends HTMLElement {
           }
         };
 
+        // Live-edge catch-up — ported from go2rtc's own reference client
+        // (www/video-rtc.js). Without this, the video just plays whatever
+        // was first buffered at 1x forever; any early buffering or stall
+        // leaves it however far behind "now" that was, with nothing ever
+        // pulling it back — observed as a growing, eventually 10+ second
+        // gap between the pill's clock (Date.now()) and what's on screen.
+        // Keeps only the last ~5s of buffer, jumps forward if playback
+        // fell further behind than that, and nudges playbackRate up
+        // slightly whenever there's a small gap to close.
+        const catchUpToLiveEdge = () => {
+          if (token !== this._liveToken || !sourceBuffer || sourceBuffer.updating) return;
+          const buffered = sourceBuffer.buffered;
+          if (!buffered?.length) return;
+          try {
+            const end = buffered.end(buffered.length - 1);
+            const start = end - 5;
+            const start0 = buffered.start(0);
+            if (start > start0) {
+              sourceBuffer.remove(start0, start);
+              if (ms.readyState === "open") ms.setLiveSeekableRange(start, end);
+            }
+            if (video.currentTime < start) video.currentTime = start;
+            const gap = end - video.currentTime;
+            video.playbackRate = gap > 0.1 ? Math.min(gap, 2) : 1;
+          } catch (err) {
+            console.warn("[frigate-timeline-card] live-edge catch-up failed", err);
+          }
+        };
+
         const ws = new WebSocket(wsUrl);
         ws.binaryType = "arraybuffer";
         this._rtcWebSocket = ws;
@@ -1302,6 +1331,7 @@ class FrigateTimelineCard extends HTMLElement {
                   sourceBuffer = ms.addSourceBuffer(msg.value);
                   sourceBuffer.mode = "segments";
                   sourceBuffer.addEventListener("updateend", pump);
+                  sourceBuffer.addEventListener("updateend", catchUpToLiveEdge);
                 } catch (err) {
                   console.warn(`[frigate-timeline-card] addSourceBuffer failed for mime "${msg.value}"`, err);
                   this._showStageError(this._t("liveFrigateError"));
