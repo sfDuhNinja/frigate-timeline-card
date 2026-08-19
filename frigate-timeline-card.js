@@ -1093,6 +1093,18 @@ class FrigateTimelineCard extends HTMLElement {
    *     extra hop/point of failure.
    */
   async _showLive() {
+    // _build() calls _showLive() once at the end, unconditionally — before
+    // `hass` has ever been set (setConfig()/_build() run synchronously,
+    // hass arrives from the platform afterward). The ha-camera-stream path
+    // already tolerated that fine (it bails on `!this._hass` internally),
+    // but _showLiveViaGo2rtc() doesn't need hass at all and would happily
+    // start a real WS connection on this premature call — which then gets
+    // torn down moments later when hass actually arrives and _showLive()
+    // runs again for real, killing the connection mid-handshake every
+    // single time. Bailing here uniformly means only the real, later call
+    // (via the `hass` setter's `first` check, or a Live click) ever does
+    // any work, regardless of live_source.
+    if (!this._hass) return;
     this._playingClip = null;
     this._pillMode = "live";
     // Returning to live should mean returning to "now" on the timeline too
