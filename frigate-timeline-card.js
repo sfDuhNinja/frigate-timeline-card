@@ -1259,13 +1259,21 @@ class FrigateTimelineCard extends HTMLElement {
 
         ws.onopen = () => {
           if (token !== this._liveToken) return;
-          // Broad, go2rtc-documented default codec list — the server picks
-          // what it can actually offer for this camera (H264 baseline is
-          // universally supported) and tells us the exact mime to use.
+          // go2rtc's documented example list includes "flac" — dropped
+          // here. Confirmed root cause of two cameras staying black with
+          // no visible error (see _showLiveViaGo2rtc's own history/commit
+          // log): this camera's source is H.265, and go2rtc paired our
+          // claimed "flac" support with it, returning
+          // `video/mp4; codecs="hvc1.1.6.L153.B0,flac"` — a combination
+          // MediaSource.isTypeSupported() confirms this engine rejects
+          // outright (verified directly in the browser console), so
+          // addSourceBuffer() threw for every camera whose audio track
+          // isn't already AAC/Opus. AAC (mp4a.40.*) and Opus alone are
+          // reliably supported and cover effectively all real cameras.
           ws.send(
             JSON.stringify({
               type: "mse",
-              value: "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0,mp4a.40.2,mp4a.40.5,flac,opus",
+              value: "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0,mp4a.40.2,mp4a.40.5,opus",
             })
           );
         };
