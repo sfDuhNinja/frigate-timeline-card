@@ -1825,6 +1825,14 @@ class FrigateTimelineCard extends HTMLElement {
     let hlsSourceUrl = hlsUrl;
     this._playingClip = clip;
     this._pillMode = "clip";
+    // `video.currentTime === 0` is exactly `startSec`, with no correction
+    // needed: nginx-vod-module clips the response to the requested second
+    // wherever it falls inside a recording segment — verified by asking for
+    // 10s windows at 0, 5 and 8 seconds into a segment and getting 9.93,
+    // 9.95 and 9.97 seconds back. The card used to assume the opposite and
+    // rewrite this to the containing segment's own start_time, which sits
+    // 3 to 9 seconds earlier; that correction was the whole reason the pill
+    // disagreed with the camera's burned-in clock.
     this._clipStartSec = startSec;
     this._clipCurrentMs = tsMs;
     this._liveToken = (this._liveToken || 0) + 1; // invalidate any in-flight _showLive()
@@ -1909,9 +1917,6 @@ class FrigateTimelineCard extends HTMLElement {
       else video.src = source.url;
     });
 
-    // Best-effort correction, fired in parallel and never awaited — it only
-    // adjusts the pill's clock, and playback must not wait on it.
-    this._correctClipStartSec(camId, base, startSec);
   }
 
   /**
@@ -1948,74 +1953,6 @@ class FrigateTimelineCard extends HTMLElement {
     const mp4 = await this._signHaPath(`${proxy}/recording/${camera}/start/${startSec}/end/${endSec}`, 3600);
     if (mp4) return { url: mp4, hls: false };
     return fallback;
-  }
-
-  /**
-   * Frigate stores recordings in ~10s segments, split only on keyframes —
-   * it can't start a VOD/clip response at the exact requested `start`
-   * second, only at the nearest segment boundary. Our pill time assumes
-   * `video.currentTime === 0` lines up with the requested `startSec`
-   * exactly, which is off by however far that boundary actually was —
-   * visible as a mismatch against a camera's own burned-in timestamp
-   * overlay. Fetches the real segment list around the requested time and
-   * corrects `_clipStartSec` to the segment's true `start_time` once known.
-   *
-   * Goes through Home Assistant's `frigate/recordings/get` rather than
-   * Frigate's own `/<camera>/recordings` REST endpoint: the direct call is
-   * cross-origin and Frigate sends no `Access-Control-Allow-Origin`, so it
-   * was blocked on every single click (one red console error each) and the
-   * correction never actually happened. Direct REST is kept only as a
-   * fallback for setups without the Frigate HA integration, where it is
-   * still best-effort and still silently ignored on failure.
-   */
-  async _correctClipStartSec(camId, base, requestedStartSec) {
-    const clipToken = this._playingClip;
-    try {
-      const after = requestedStartSec - 1;
-      const before = requestedStartSec + 11; // ~one segment of margin either side
-      let segments = null;
-      if (this._hass?.connection) {
-        try {
-          let wsSegments = await this._hass.connection.sendMessagePromise({
-            type: "frigate/recordings/get",
-            instance_id: this._config.frigate_instance_id,
-            camera: camId,
-            after,
-            before,
-          });
-          if (typeof wsSegments === "string") wsSegments = JSON.parse(wsSegments);
-          if (Array.isArray(wsSegments)) segments = wsSegments;
-        } catch (err) {
-          console.warn("[frigate-timeline-card] WS frigate/recordings/get failed", err);
-        }
-      }
-      if (!Array.isArray(segments)) {
-        const res = await fetch(`${base}/${camId}/recordings?after=${after}&before=${before}`);
-        if (!res.ok) return;
-        segments = await res.json();
-      }
-      if (this._playingClip !== clipToken) return; // superseded by a newer seek/live
-      if (!Array.isArray(segments) || !segments.length) return;
-      let best = null;
-      let bestDist = Infinity;
-      for (const seg of segments) {
-        const segStart = Number(seg.start_time);
-        const segEnd = Number(seg.end_time);
-        if (!Number.isFinite(segStart)) continue;
-        if (Number.isFinite(segEnd) && requestedStartSec >= segStart && requestedStartSec <= segEnd) {
-          best = segStart;
-          break;
-        }
-        const dist = Math.abs(segStart - requestedStartSec);
-        if (dist < bestDist) {
-          bestDist = dist;
-          best = segStart;
-        }
-      }
-      if (best != null) this._clipStartSec = best;
-    } catch (err) {
-      console.warn("[frigate-timeline-card] recordings lookup unavailable (CORS or unreachable) — pill time is an approximation", err);
-    }
   }
 
   /**
