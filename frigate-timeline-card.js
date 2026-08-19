@@ -1284,7 +1284,15 @@ class FrigateTimelineCard extends HTMLElement {
       this._liveBtnEl.classList.toggle("on-live", true);
     }
 
-    if (!("MediaSource" in window)) {
+    // iPhone has no `MediaSource` at all — Safari exposes only
+    // `ManagedMediaSource` there (iOS 17.1+), a deliberately
+    // API-compatible replacement Apple gates streaming behind. That single
+    // missing global is why `live_source: frigate` could never work on a
+    // phone: this check failed before a socket was ever opened, and the
+    // card went straight to its "live failed" message. iPad and desktop
+    // Safari keep plain MediaSource, so both names have to be tried.
+    const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
+    if (!MediaSourceClass) {
       this._showStageError(this._t("liveFrigateError"));
       return;
     }
@@ -1317,8 +1325,19 @@ class FrigateTimelineCard extends HTMLElement {
         return;
       }
       try {
-        const ms = new MediaSource();
-        video.src = URL.createObjectURL(ms);
+        const ms = new MediaSourceClass();
+        if (window.ManagedMediaSource && ms instanceof window.ManagedMediaSource) {
+          // Apple attaches a ManagedMediaSource only when the element can't
+          // hand playback off to AirPlay — either an AirPlay source
+          // alternative exists or remote playback is explicitly disabled.
+          // Live view has neither to offer, so it opts out. Attachment is
+          // via srcObject rather than an object URL, which is the only form
+          // Safari accepts for it.
+          video.disableRemotePlayback = true;
+          video.srcObject = ms;
+        } else {
+          video.src = URL.createObjectURL(ms);
+        }
         let sourceBuffer = null;
         let gotData = false;
         const queue = [];
