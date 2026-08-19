@@ -57,3 +57,9 @@ Most Frigate/camera Lovelace cards bundle a full media gallery, thumbnails, PTZ,
 ## License
 
 MIT
+
+## Resource use
+
+Live streams stop while the dashboard is out of sight and start again on return — locking the phone or switching apps ends the decode rather than leaving it running. On a phone showing three cameras that is three simultaneous hardware decodes reclaimed.
+
+If a camera drops intermittently, check what it is actually streaming: `frigate_stream: sub` is often the difference between a 4K HEVC stream and a 720p H.264 one, and three simultaneous 4K decodes is where hardware decoders start failing.

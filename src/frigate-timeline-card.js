@@ -72,6 +72,14 @@
  */
 
 const PLAYHEAD_TICK_MS = 60 * 1000;
+/** How often the live watchdog samples playback progress. */
+const WATCHDOG_MS = 5000;
+/** Data still arriving but the playhead frozen this long — reconnect. */
+const STALL_RECONNECT_MS = 10000;
+/** Playhead this far behind the live edge is unrecoverable — reconnect. */
+const MAX_LIVE_LAG_SEC = 60;
+/** Minimum spacing between live-edge catch-up passes. */
+const CATCH_UP_INTERVAL_MS = 1000;
 const ALERT_LABEL_RE = /^(person|car)(-verified)?$|-verified$/;
 const ALERT_SCORE_THRESHOLD = 0.7;
 
@@ -201,6 +209,17 @@ function shiftDayKey(dayKey, delta) {
 }
 
 class FrigateTimelineCard extends HTMLElement {
+  constructor() {
+    super();
+    // Bound once so connectedCallback/disconnectedCallback can add and
+    // remove the exact same references. They dispatch into whatever the
+    // scrub wiring installed, which keeps that logic where it reads best
+    // while still leaving one pair of listeners to detach.
+    this._onVisibilityChange = () => (document.hidden ? this._suspendLive() : this._resumeLive());
+    this._onWindowPointerMove = (e) => this._windowDragMove?.(e);
+    this._onWindowPointerUp = () => this._windowDragStop?.();
+  }
+
   _t(key) {
     return translate(this._hass, key);
   }
@@ -317,6 +336,17 @@ class FrigateTimelineCard extends HTMLElement {
     // Cheap per-second tick — only moves/re-labels the now-pill, no bar
     // rebuild — so the clock reads live seconds like the reference UI.
     this._clockInterval = setInterval(() => this._updateNowPill(), 1000);
+    document.addEventListener("visibilitychange", this._onVisibilityChange);
+    // Drag tracking has to live on `window`, not the track: a pointer that
+    // leaves the element mid-drag still has to be followed. Bound here
+    // rather than in _build() so it can be unbound on disconnect — _build()
+    // runs once per card, but a card can be detached and re-attached
+    // (moving between views, a dashboard re-render) any number of times,
+    // and each pass used to leave another permanent set behind on window.
+    window.addEventListener("pointermove", this._onWindowPointerMove);
+    window.addEventListener("pointerup", this._onWindowPointerUp);
+    window.addEventListener("pointercancel", this._onWindowPointerUp);
+    if (this._built && this._liveSuspended && !document.hidden) this._resumeLive();
   }
 
   disconnectedCallback() {
@@ -328,8 +358,50 @@ class FrigateTimelineCard extends HTMLElement {
       clearInterval(this._clockInterval);
       this._clockInterval = null;
     }
+    document.removeEventListener("visibilitychange", this._onVisibilityChange);
+    window.removeEventListener("pointermove", this._onWindowPointerMove);
+    window.removeEventListener("pointerup", this._onWindowPointerUp);
+    window.removeEventListener("pointercancel", this._onWindowPointerUp);
+    // Bumped before the teardown so the in-flight attempt's onclose reads
+    // it as superseded rather than as a drop worth reconnecting.
+    this._liveToken = (this._liveToken || 0) + 1;
     this._teardownWebRtc();
     this._teardownHls();
+  }
+
+  /**
+   * Live streams stop while the dashboard is out of sight and start again
+   * on return. On a phone that is three simultaneous decodes — 4K among
+   * them — running on for as long as the screen is locked or another app
+   * is in front, which is the single largest thing this card costs.
+   *
+   * It is also a correctness fix, not only a battery one. A backgrounded
+   * page stops advancing playback but the socket keeps delivering, so the
+   * buffer grows without bound and the playhead falls arbitrarily far
+   * behind — the same wedged state the watchdog exists to catch, reached
+   * by simply locking the phone. Nothing to catch up to if the stream was
+   * never left running.
+   */
+  _suspendLive() {
+    if (this._liveSuspended || this._playingClip || !this._built) return;
+    this._liveSuspended = true;
+    this._liveToken = (this._liveToken || 0) + 1;
+    this._teardownWebRtc();
+    this._teardownHls();
+    // The go2rtc path leaves its <video> in place, so the last decoded
+    // frame stays on screen instead of a black card. <ha-camera-stream>
+    // has no equivalent — it keeps streaming until it is removed.
+    if (this._config?.live_source !== "frigate") {
+      this._stageEl.innerHTML = "";
+      this._streamEl = null;
+    }
+  }
+
+  _resumeLive() {
+    if (!this._liveSuspended) return;
+    this._liveSuspended = false;
+    if (this._playingClip) return; // a clip is on screen; live isn't wanted
+    this._showLive();
   }
 
   _teardownHls() {
@@ -676,12 +748,12 @@ class FrigateTimelineCard extends HTMLElement {
       const frac = fracFromEvent(e);
       if (frac != null) scheduleSeek(previewAt(frac));
     });
-    window.addEventListener("pointermove", (e) => {
+    this._windowDragMove = (e) => {
       if (!dragging) return;
       const frac = fracFromEvent(e);
       if (frac == null) return;
       scheduleSeek(previewAt(frac));
-    });
+    };
     const stop = () => {
       if (!dragging) return;
       dragging = false;
@@ -693,8 +765,7 @@ class FrigateTimelineCard extends HTMLElement {
       }
       if (lastTs != null) this._playAt(lastTs);
     };
-    window.addEventListener("pointerup", stop);
-    window.addEventListener("pointercancel", stop);
+    this._windowDragStop = stop;
   }
 
   _wireTrackInteraction() {
@@ -1347,6 +1418,9 @@ class FrigateTimelineCard extends HTMLElement {
         // alone can't cover it: token only changes on _showLive()/_playAt(),
         // never between retries of the same live view.
         let cancelled = false;
+        // Set only for failures no reconnect can fix (an unsupported codec
+        // is the same on the next attempt). Everything else retries.
+        let fatal = false;
 
         const pump = () => {
           if (cancelled || token !== this._liveToken) return;
@@ -1394,8 +1468,16 @@ class FrigateTimelineCard extends HTMLElement {
         // that did any catching up at all. Handing the MediaSource the
         // Infinity duration a live stream should report anyway is what lets
         // the trim itself succeed.
+        let lastCatchUpAt = 0;
         const catchUpToLiveEdge = () => {
           if (cancelled || token !== this._liveToken || !sourceBuffer) return;
+          // `updateend` fires on every appended fragment — measured at
+          // roughly twenty times a second per camera, and this runs once
+          // per card. None of what it does needs that resolution: a trim
+          // and a playback-rate nudge are worth doing about once a second.
+          const now = Date.now();
+          if (now - lastCatchUpAt < CATCH_UP_INTERVAL_MS) return;
+          lastCatchUpAt = now;
           let buffered;
           let end;
           try {
@@ -1421,7 +1503,11 @@ class FrigateTimelineCard extends HTMLElement {
             // to absorb instead of being yanked out in one frame. Anything
             // sharper is visible on screen and buys nothing on a live view.
             const gap = end - video.currentTime;
-            video.playbackRate = gap > 1 ? Math.min(1 + (gap - 1) * 0.25, 1.5) : 1;
+            const rate = gap > 1 ? Math.min(1 + (gap - 1) * 0.25, 1.5) : 1;
+            // Writing playbackRate is not free — it re-times the audio and
+            // can nudge the decoder — so leave it alone when it already
+            // holds the value we want.
+            if (Math.abs(video.playbackRate - rate) > 0.01) video.playbackRate = rate;
           } catch (err) {
             console.warn("[frigate-timeline-card] live-edge catch-up failed", err);
           }
@@ -1439,6 +1525,10 @@ class FrigateTimelineCard extends HTMLElement {
           if (cancelled) return;
           cancelled = true;
           queue.length = 0;
+          if (watchdog) {
+            clearInterval(watchdog);
+            watchdog = null;
+          }
           video.removeEventListener("error", onMediaError);
           try {
             sourceBuffer?.removeEventListener("updateend", pump);
@@ -1473,6 +1563,61 @@ class FrigateTimelineCard extends HTMLElement {
           }
         };
         video.addEventListener("error", onMediaError);
+
+        // Watchdog for the failure mode neither of the handlers above can
+        // see: playback wedges while nothing reports a thing. Captured on a
+        // 4K HEVC camera — `readyState` stayed at HAVE_ENOUGH_DATA, the
+        // socket delivered 3500 segments without a pause, no `error`, no
+        // `close`, no `stalled`, and `currentTime` sat frozen at 3.9s for
+        // the entire run. The card just goes black, and only a manual tap
+        // on Live brings it back, because a fresh _showLive() is the one
+        // path that rebuilds everything.
+        //
+        // The trim made it worse rather than saving it: it cuts relative to
+        // `currentTime`, so a frozen clock freezes the trim too, and the
+        // buffer then grows without bound — 138 seconds of 4K still climbing
+        // by the end of that capture.
+        //
+        // Detection deliberately doesn't try to know *why* the decoder
+        // stopped. Data still arriving while the playhead doesn't move is
+        // enough, whatever the cause, and the fix is the same thing the user
+        // would do by hand: reconnect, via the same non-1000 close the other
+        // recovery paths use.
+        let lastEnd = -1;
+        let lastCurrentTime = -1;
+        let stalledMs = 0;
+        let watchdog = setInterval(() => {
+          if (cancelled || token !== this._liveToken || document.hidden) return;
+          let end;
+          try {
+            const b = sourceBuffer?.buffered;
+            if (!b?.length) return;
+            end = b.end(b.length - 1);
+          } catch (_) {
+            return; // detached — teardownAttempt will clear this interval
+          }
+          const currentTime = video.currentTime;
+          const feeding = end > lastEnd + 0.5;
+          const advancing = currentTime > lastCurrentTime + 0.05;
+          lastEnd = end;
+          lastCurrentTime = currentTime;
+          stalledMs = feeding && !advancing ? stalledMs + WATCHDOG_MS : 0;
+          // The lag test is the same failure caught from the other side: a
+          // playhead this far behind the live edge is never coming back on
+          // playbackRate alone, and trimming forward to it is what killed
+          // the decoder in the first place.
+          if (stalledMs < STALL_RECONNECT_MS && end - currentTime < MAX_LIVE_LAG_SEC) return;
+          console.warn("[frigate-timeline-card] live stream wedged — reconnecting", {
+            stalledMs,
+            lagSec: Number((end - currentTime).toFixed(1)),
+          });
+          teardownAttempt();
+          try {
+            ws.close(4002);
+          } catch (_) {
+            /* already closing — onclose still runs */
+          }
+        }, WATCHDOG_MS);
 
         ws.onopen = () => {
           if (token !== this._liveToken) return;
@@ -1526,9 +1671,11 @@ class FrigateTimelineCard extends HTMLElement {
                   this._showStageError(this._t("liveFrigateError"));
                   // Nothing downstream can ever consume the queue without a
                   // SourceBuffer — closing stops binary segments from
-                  // piling up in `queue` forever for no reason (1000, a
-                  // deliberate close, so onclose's retry logic doesn't
-                  // treat this as a network blip worth retrying).
+                  // piling up in `queue` forever for no reason. Marked
+                  // fatal so onclose doesn't treat it as a blip worth
+                  // retrying: the codec won't be any more supported next
+                  // time round.
+                  fatal = true;
                   ws.close(1000);
                 }
               };
@@ -1557,8 +1704,21 @@ class FrigateTimelineCard extends HTMLElement {
         };
         ws.onclose = (e) => {
           teardownAttempt();
-          if (e.code === 1000 || token !== this._liveToken) return;
-          console.warn(`[frigate-timeline-card] go2rtc MSE WS closed unexpectedly (code ${e.code})`, {
+          // Intent deliberately does NOT come from the close code. Home
+          // Assistant's proxy rewrites whatever the client asks for to
+          // 1000 — verified directly: close(4001), close(4002) and
+          // close(3999) all arrive here as `code: 1000, wasClean: true`.
+          // This used to read `if (e.code === 1000) return`, which meant
+          // every recovery path that signalled by closing with its own code
+          // was silently answered with "deliberate close, do nothing" —
+          // the decode-error reconnect never once reconnected.
+          //
+          // A deliberate teardown is recognised by the token instead:
+          // _showLive() and _playAt() both bump `_liveToken` before closing
+          // the socket, as does disconnectedCallback. Anything else — an
+          // unexpected drop, or one of our own recovery paths — retries.
+          if (fatal || token !== this._liveToken || !this.isConnected) return;
+          console.warn(`[frigate-timeline-card] go2rtc MSE WS closed (code ${e.code}) — retrying`, {
             attempt,
             gotData,
           });
@@ -1942,6 +2102,7 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   _updateNowPill() {
+    if (document.hidden) return; // nobody is reading a clock they can't see
     if (!this._nowPillEl || this._scrubbing) return; // don't fight the drag preview
     const win = this._currentWindow();
     const isClip = this._pillMode === "clip";
