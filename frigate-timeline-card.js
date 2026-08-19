@@ -1209,88 +1209,115 @@ class FrigateTimelineCard extends HTMLElement {
       return;
     }
 
-    try {
-      const ms = new MediaSource();
-      video.src = URL.createObjectURL(ms);
-      let sourceBuffer = null;
-      const queue = [];
-      const pump = () => {
-        // A superseded connection's SourceBuffer can still fire a trailing
-        // `updateend` after a newer _showLive()/_playAt() call has already
-        // torn down the stage — appendBuffer() on it then throws
-        // InvalidStateError. Same token guard as everywhere else.
-        if (token !== this._liveToken) return;
-        if (!sourceBuffer || sourceBuffer.updating || !queue.length) return;
-        try {
-          sourceBuffer.appendBuffer(queue.shift());
-        } catch (err) {
-          console.warn("[frigate-timeline-card] appendBuffer failed", err);
-        }
-      };
-
-      const ws = new WebSocket(wsUrl);
-      ws.binaryType = "arraybuffer";
-      this._rtcWebSocket = ws;
-
-      ws.onopen = () => {
-        if (token !== this._liveToken) return;
-        // Broad, go2rtc-documented default codec list — the server picks
-        // what it can actually offer for this camera (H264 baseline is
-        // universally supported) and tells us the exact mime to use.
-        ws.send(
-          JSON.stringify({
-            type: "mse",
-            value: "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0,mp4a.40.2,mp4a.40.5,flac,opus",
-          })
-        );
-      };
-      ws.onmessage = (evt) => {
-        if (token !== this._liveToken) return;
-        if (typeof evt.data === "string") {
+    // Retries with backoff on an unexpected close — needed because the very
+    // first connection attempt reliably gets torn down early on a subview
+    // with several of these cards mounting at once (each one's first
+    // _showLive() call races against Lovelace re-rendering the view once
+    // more as it settles in). Without a retry, that one lost race means
+    // permanently black — no code path ever tried again until a manual
+    // click on Live. Confirmed exactly this pattern: 3 cards on the same
+    // subview, all 3 logging "WebSocket is closed before the connection is
+    // established" at once on load, only one recovering by luck.
+    const MAX_ATTEMPTS = 5;
+    const connect = (attempt) => {
+      if (token !== this._liveToken) return;
+      try {
+        const ms = new MediaSource();
+        video.src = URL.createObjectURL(ms);
+        let sourceBuffer = null;
+        let gotData = false;
+        const queue = [];
+        const pump = () => {
+          // A superseded connection's SourceBuffer can still fire a
+          // trailing `updateend` after a newer connect()/_showLive() call
+          // has already torn down the stage — appendBuffer() on it then
+          // throws InvalidStateError. Same token guard as everywhere else.
+          if (token !== this._liveToken) return;
+          if (!sourceBuffer || sourceBuffer.updating || !queue.length) return;
           try {
-            const msg = JSON.parse(evt.data);
-            if (msg.type === "mse" && !sourceBuffer) {
-              const create = () => {
-                if (token !== this._liveToken) return;
-                sourceBuffer = ms.addSourceBuffer(msg.value);
-                sourceBuffer.mode = "segments";
-                sourceBuffer.addEventListener("updateend", pump);
-              };
-              if (ms.readyState === "open") create();
-              else ms.addEventListener("sourceopen", create, { once: true });
-            } else if (msg.type === "error") {
-              console.warn("[frigate-timeline-card] go2rtc MSE error", msg.value);
-              this._showStageError(this._t("liveFrigateError"));
-            }
-          } catch (_) {
-            /* ignore malformed control message */
-          }
-          return;
-        }
-        // Binary fMP4 segment.
-        if (!sourceBuffer || sourceBuffer.updating || queue.length) {
-          queue.push(evt.data);
-        } else {
-          try {
-            sourceBuffer.appendBuffer(evt.data);
+            sourceBuffer.appendBuffer(queue.shift());
           } catch (err) {
             console.warn("[frigate-timeline-card] appendBuffer failed", err);
           }
-        }
-      };
-      ws.onerror = () => {
-        if (token === this._liveToken) console.warn("[frigate-timeline-card] go2rtc MSE WS error");
-      };
-      ws.onclose = (e) => {
-        if (e.code !== 1000 && token === this._liveToken) {
-          console.warn(`[frigate-timeline-card] go2rtc MSE WS closed unexpectedly (code ${e.code})`);
-          this._showStageError(this._t("liveFrigateError"));
-        }
-      };
-    } catch (err) {
-      console.warn("[frigate-timeline-card] go2rtc live view failed", err);
-      if (token === this._liveToken) this._showStageError(this._t("liveFrigateError"));
-    }
+        };
+
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = "arraybuffer";
+        this._rtcWebSocket = ws;
+
+        ws.onopen = () => {
+          if (token !== this._liveToken) return;
+          // Broad, go2rtc-documented default codec list — the server picks
+          // what it can actually offer for this camera (H264 baseline is
+          // universally supported) and tells us the exact mime to use.
+          ws.send(
+            JSON.stringify({
+              type: "mse",
+              value: "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0,mp4a.40.2,mp4a.40.5,flac,opus",
+            })
+          );
+        };
+        ws.onmessage = (evt) => {
+          if (token !== this._liveToken) return;
+          if (typeof evt.data === "string") {
+            try {
+              const msg = JSON.parse(evt.data);
+              if (msg.type === "mse" && !sourceBuffer) {
+                const create = () => {
+                  if (token !== this._liveToken) return;
+                  sourceBuffer = ms.addSourceBuffer(msg.value);
+                  sourceBuffer.mode = "segments";
+                  sourceBuffer.addEventListener("updateend", pump);
+                };
+                if (ms.readyState === "open") create();
+                else ms.addEventListener("sourceopen", create, { once: true });
+              } else if (msg.type === "error") {
+                console.warn("[frigate-timeline-card] go2rtc MSE error", msg.value);
+                this._showStageError(this._t("liveFrigateError"));
+              }
+            } catch (_) {
+              /* ignore malformed control message */
+            }
+            return;
+          }
+          // Binary fMP4 segment.
+          gotData = true;
+          if (!sourceBuffer || sourceBuffer.updating || queue.length) {
+            queue.push(evt.data);
+          } else {
+            try {
+              sourceBuffer.appendBuffer(evt.data);
+            } catch (err) {
+              console.warn("[frigate-timeline-card] appendBuffer failed", err);
+            }
+          }
+        };
+        ws.onerror = () => {
+          if (token === this._liveToken) console.warn("[frigate-timeline-card] go2rtc MSE WS error");
+        };
+        ws.onclose = (e) => {
+          if (e.code === 1000 || token !== this._liveToken) return;
+          console.warn(`[frigate-timeline-card] go2rtc MSE WS closed unexpectedly (code ${e.code})`, {
+            attempt,
+            gotData,
+          });
+          if (attempt < MAX_ATTEMPTS) {
+            // A connection that had already started delivering data and
+            // then dropped waits a bit longer (real network hiccup) than
+            // one that never got going at all (the early-teardown race —
+            // retry fast, the next attempt usually just works).
+            const delayMs = gotData ? Math.min(1000 * 2 ** attempt, 8000) : 300 * (attempt + 1);
+            setTimeout(() => connect(attempt + 1), delayMs);
+          } else {
+            this._showStageError(this._t("liveFrigateError"));
+          }
+        };
+      } catch (err) {
+        console.warn("[frigate-timeline-card] go2rtc live view failed", err);
+        if (token === this._liveToken) this._showStageError(this._t("liveFrigateError"));
+      }
+    };
+    connect(0);
   }
 
   /** Lazily loads hls.js for browsers without native HLS (Safari/iOS/macOS
