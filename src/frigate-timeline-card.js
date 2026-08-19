@@ -719,12 +719,58 @@ class FrigateTimelineCard extends HTMLElement {
     let throttleTimer = null;
     let lastTs = null;
 
-    const fracFromEvent = (e) => {
+    const fracFromClientX = (x) => {
       const rect = this._trackEl.getBoundingClientRect();
-      if (!rect.width) return null;
-      const x = e.clientX ?? e.touches?.[0]?.clientX;
-      if (x == null) return null;
+      if (!rect.width || x == null) return null;
       return Math.min(1, Math.max(0, (x - rect.left) / rect.width));
+    };
+    const fracFromEvent = (e) => fracFromClientX(e.clientX ?? e.touches?.[0]?.clientX);
+
+    // Dragging the selector to either end scrolls the window that way, so
+    // a zoomed-in strip can be scrubbed past its own edges instead of
+    // stopping at them. Framerate-driven rather than pointer-driven: once
+    // the finger is parked in the edge zone it stops producing move events,
+    // and the scroll has to keep going on its own.
+    let autoPan = null;
+    let lastClientX = null;
+    const EDGE_ZONE_PX = 40;
+    // Deliberately a pixel rate, not a time rate: the strip should scroll
+    // at the same visible speed whether it's showing an hour or a day.
+    // ~180px/s — a third of a typical strip per second, fast enough to get
+    // somewhere and slow enough to stop where you meant to.
+    const MAX_PAN_PX_PER_FRAME = 3;
+    const stopAutoPan = () => {
+      if (autoPan == null) return;
+      cancelAnimationFrame(autoPan);
+      autoPan = null;
+    };
+    const stepAutoPan = () => {
+      autoPan = null;
+      if (!dragging) return;
+      const rect = this._trackEl.getBoundingClientRect();
+      // Panning a full-day view means nothing — there is nothing either
+      // side of it to scroll to.
+      if (rect.width && lastClientX != null && (this._windowHours || 24) < 24) {
+        let push = 0;
+        if (lastClientX < rect.left + EDGE_ZONE_PX) push = (lastClientX - (rect.left + EDGE_ZONE_PX)) / EDGE_ZONE_PX;
+        else if (lastClientX > rect.right - EDGE_ZONE_PX) push = (lastClientX - (rect.right - EDGE_ZONE_PX)) / EDGE_ZONE_PX;
+        if (push) {
+          // Past the edge entirely counts as a full push, not more — a
+          // finger dragged off the card shouldn't fling the day past.
+          push = Math.max(-1, Math.min(1, push));
+          const win = this._currentWindow();
+          const day = dayWindow(this._dayKey);
+          const msPerPx = (win.end - win.start) / rect.width;
+          const center = this._centerMs ?? win.start + (win.end - win.start) / 2;
+          this._centerMs = Math.min(day.end, Math.max(day.start, center + push * MAX_PAN_PX_PER_FRAME * msPerPx));
+          this._renderTimeline();
+          // The window moved under a stationary finger, so the same point
+          // on screen is a different moment now.
+          const frac = fracFromClientX(lastClientX);
+          if (frac != null) scheduleSeek(previewAt(frac));
+        }
+      }
+      autoPan = requestAnimationFrame(stepAutoPan);
     };
 
     const previewAt = (frac) => {
@@ -758,11 +804,15 @@ class FrigateTimelineCard extends HTMLElement {
       dragging = true;
       this._scrubbing = true;
       this._nowLineEl.classList.add("scrubbing");
+      lastClientX = e.clientX ?? null;
       const frac = fracFromEvent(e);
       if (frac != null) scheduleSeek(previewAt(frac));
+      stopAutoPan();
+      autoPan = requestAnimationFrame(stepAutoPan);
     });
     this._windowDragMove = (e) => {
       if (!dragging) return;
+      lastClientX = e.clientX ?? e.touches?.[0]?.clientX ?? lastClientX;
       const frac = fracFromEvent(e);
       if (frac == null) return;
       scheduleSeek(previewAt(frac));
@@ -770,6 +820,8 @@ class FrigateTimelineCard extends HTMLElement {
     const stop = () => {
       if (!dragging) return;
       dragging = false;
+      stopAutoPan();
+      lastClientX = null;
       this._scrubbing = false;
       this._nowLineEl.classList.remove("scrubbing");
       if (throttleTimer) {
