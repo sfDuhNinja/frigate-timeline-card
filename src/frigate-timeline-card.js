@@ -15,19 +15,28 @@
  * priority order as that fork, with REST to `frigate_url` as a secondary
  * enhancement (exact severity from /api/review has no WS equivalent).
  *
- * Why WS-first and ha-camera-stream, not a raw connection straight to
+ * Why everything goes through Home Assistant rather than straight to
  * Frigate's LAN address: this card originally tried exactly that (raw
  * `ws://<lan-ip>:1984/...` for live, REST-first for events) and it broke
  * outright the moment the dashboard itself is served over https (Tailscale,
- * Nabu Casa, any TLS reverse proxy — common, not an edge case). Browsers
- * block that as mixed content with no visible error. Routing everything
- * through Home Assistant's own same-origin connection sidesteps it
- * entirely — `<ha-camera-stream>` and `frigate/events/get` both go over
- * HA's existing secure WebSocket, never a raw request to the camera's LAN
- * IP. Direct REST to `frigate_url` (events enhancement, clip HLS playback)
- * still requires the dashboard be reachable to that address unencrypted —
- * fine on plain http/LAN access, silently unavailable over https, which is
- * why the WS path is primary rather than a fallback.
+ * Nabu Casa, any TLS reverse proxy — common, not an edge case), or simply
+ * viewed from a phone that can reach Home Assistant but not Frigate's own
+ * hostname. Browsers block the https case as mixed content with no visible
+ * error, and CORS blocks every cross-origin REST call besides, since
+ * Frigate sends no `Access-Control-Allow-Origin` and has no setting to.
+ *
+ * So nothing here talks to `frigate_url` from the browser by choice:
+ *   - live: `<ha-camera-stream>`, or the Frigate integration's own MSE
+ *     proxy (`/api/frigate/<instance>/mse/api/ws`) for `live_source:
+ *     frigate`
+ *   - events / reviews / recordings: `frigate/events/get`,
+ *     `frigate/reviews/get`, `frigate/recordings/get` over HA's websocket
+ *   - recorded clips: the integration's `/api/frigate/<instance>/recording/…`
+ *     proxy, on an `auth/sign_path` signature
+ * All of it is same-origin with the dashboard, so it works identically over
+ * LAN http, Tailscale and Nabu Casa. Direct REST/go2rtc access to
+ * `frigate_url` survives only as a fallback for setups without the Frigate
+ * HA integration, where it carries every caveat above.
  *
  * All `<video>` elements run with `controls=false`; play/pause, mute, and
  * fullscreen live in a control bar below the stage, not as overlays.
@@ -51,14 +60,14 @@
  * Config:
  *   type: custom:frigate-timeline-card
  *   camera_entity: camera.camera_spate      # required unless live_source: frigate — HA camera entity, for the ha-camera-stream live view
- *   frigate_url: http://192.168.1.11:5000   # required — Frigate REST base (events enhancement + clip playback; needs http/LAN reachability from the browser)
+ *   frigate_url: http://192.168.1.11:5000   # required — Frigate's own address; only used as a fallback path when the Frigate HA integration isn't available (and as the default go2rtc host)
  *   frigate_camera: spate                   # required — Frigate's own camera name, for scoping events/review data
  *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id, for the events WS call (default "frigate")
  *   height: 44                              # optional — timeline strip height in px
  *   default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default 10)
  *   auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default 0 = disabled)
- *   live_source: ha                         # optional — "ha" (default, via ha-camera-stream) or "frigate" (direct go2rtc WebRTC, bypasses HA's WebRTC bridge — opt-in, reintroduces the mixed-content risk described above)
- *   go2rtc_url: http://192.168.1.11:1984    # optional — only used when live_source: frigate; defaults to the frigate_url host on port 1984
+ *   live_source: ha                         # optional — "ha" (default, via ha-camera-stream) or "frigate" (go2rtc MSE through HA's Frigate proxy, bypassing HA's WebRTC bridge)
+ *   go2rtc_url: http://192.168.1.11:1984    # optional — only used when live_source: frigate; forces a direct connection to a go2rtc that isn't the one Frigate bundles (skips HA's proxy, so mixed-content/reachability caveats come back)
  *   frigate_stream: main                    # optional — only used when live_source: frigate; go2rtc stream suffix, "main" or "sub" (default "main")
  */
 
@@ -1070,6 +1079,76 @@ class FrigateTimelineCard extends HTMLElement {
     return `${this._config.frigate_camera}_${suffix}`;
   }
 
+  /** Base path of the Frigate HA integration's own reverse proxy. Every
+   * route under it is same-origin with the dashboard and travels over the
+   * connection the user already has to Home Assistant — no dependency on
+   * the browser being able to resolve or reach Frigate's LAN address, and
+   * no mixed content when the dashboard is served over https. */
+  _frigateProxyPath() {
+    return `/api/frigate/${encodeURIComponent(this._config.frigate_instance_id || "frigate")}`;
+  }
+
+  /**
+   * Signs a Home Assistant path so something that can't set an
+   * `Authorization` header — a `<video src>`, a `WebSocket` — can still use
+   * it. This is Home Assistant's own mechanism (`auth/sign_path` appends an
+   * `authSig` JWT covering the path *and* its query), the same one its
+   * frontend uses to hand media URLs to plain elements.
+   *
+   * `expires` is deliberately caller-chosen: a WebSocket only needs the
+   * signature to survive the upgrade handshake, while a `<video>` may keep
+   * pulling ranges off the same URL for the length of the clip.
+   */
+  async _signHaPath(path, expires) {
+    const conn = this._hass?.connection;
+    if (!conn) return null;
+    try {
+      const res = await conn.sendMessagePromise({ type: "auth/sign_path", path, expires });
+      return res?.path || null;
+    } catch (err) {
+      console.warn("[frigate-timeline-card] auth/sign_path failed", err);
+      return null;
+    }
+  }
+
+  /**
+   * WebSocket URL for the go2rtc MSE stream.
+   *
+   * Prefers Home Assistant's Frigate proxy (`.../mse/api/ws`, which Frigate
+   * forwards to go2rtc's `/api/ws`). Talking to go2rtc's own address
+   * directly is what made live fail everywhere except a browser sitting on
+   * the same LAN: over Tailscale or any https front end, `ws://server:1984`
+   * is either unresolvable or blocked as mixed content, which is exactly
+   * the "live via Frigate failed" seen on mobile. Through the proxy the
+   * connection is same-origin, so it is ws:// or wss:// to match the page
+   * automatically and needs nothing reachable beyond Home Assistant itself.
+   *
+   * An explicitly configured `go2rtc_url` still wins — that setting only
+   * exists to point at a go2rtc that isn't the one Frigate bundles, which
+   * the Frigate proxy by definition can't reach.
+   */
+  async _liveWsUrl() {
+    const streamName = this._go2rtcStreamName();
+    // `_proxyLiveUnavailable` covers the one case the proxy can't serve:
+    // `auth/sign_path` happily signs any path, existing or not, so a setup
+    // without the Frigate HA integration would otherwise get a perfectly
+    // signed URL to a route that 404s and never fall back. One connection
+    // that dies before delivering a single byte flips this, and the retry
+    // that follows goes straight to go2rtc the way it always did.
+    if (!this._config.go2rtc_url && !this._proxyLiveUnavailable) {
+      const signed = await this._signHaPath(
+        `${this._frigateProxyPath()}/mse/api/ws?src=${encodeURIComponent(streamName)}`,
+        60
+      );
+      if (signed) return { url: `${location.origin.replace(/^http/, "ws")}${signed}`, viaProxy: true };
+    }
+    const base = this._go2rtcUrl();
+    return {
+      url: base ? `${base.replace(/^http/, "ws")}/api/ws?src=${encodeURIComponent(streamName)}` : "",
+      viaProxy: false,
+    };
+  }
+
   /**
    * Live view has two selectable sources (`live_source` config):
    *   - `"ha"` (default): `<ha-camera-stream>`, exactly the way the
@@ -1204,18 +1283,6 @@ class FrigateTimelineCard extends HTMLElement {
       this._showStageError(this._t("liveFrigateError"));
       return;
     }
-    const go2rtcBase = this._go2rtcUrl();
-    if (!go2rtcBase) return;
-    const streamName = this._go2rtcStreamName();
-    const wsUrl = `${go2rtcBase.replace(/^http/, "ws")}/api/ws?src=${encodeURIComponent(streamName)}`;
-    if (typeof location !== "undefined" && location.protocol === "https:" && wsUrl.startsWith("ws://")) {
-      console.warn(
-        "[frigate-timeline-card] mixed content: page is https but go2rtc_url is http:// — this connection will be blocked"
-      );
-      this._showStageError(this._t("liveFrigateError"));
-      return;
-    }
-
     // Retries with backoff on an unexpected close — needed because the very
     // first connection attempt reliably gets torn down early on a subview
     // with several of these cards mounting at once (each one's first
@@ -1226,8 +1293,24 @@ class FrigateTimelineCard extends HTMLElement {
     // subview, all 3 logging "WebSocket is closed before the connection is
     // established" at once on load, only one recovering by luck.
     const MAX_ATTEMPTS = 5;
-    const connect = (attempt) => {
+    const connect = async (attempt) => {
       if (token !== this._liveToken) return;
+      // Re-signed per attempt on purpose — the signature is short-lived, and
+      // a retry minutes into a backoff would otherwise reconnect with an
+      // expired one.
+      const { url: wsUrl, viaProxy } = await this._liveWsUrl();
+      if (token !== this._liveToken) return;
+      if (!wsUrl) {
+        this._showStageError(this._t("liveFrigateError"));
+        return;
+      }
+      if (location.protocol === "https:" && wsUrl.startsWith("ws://")) {
+        console.warn(
+          "[frigate-timeline-card] mixed content: page is https but go2rtc_url is http:// — this connection will be blocked"
+        );
+        this._showStageError(this._t("liveFrigateError"));
+        return;
+      }
       try {
         const ms = new MediaSource();
         video.src = URL.createObjectURL(ms);
@@ -1257,21 +1340,54 @@ class FrigateTimelineCard extends HTMLElement {
         // Keeps only the last ~5s of buffer, jumps forward if playback
         // fell further behind than that, and nudges playbackRate up
         // slightly whenever there's a small gap to close.
+        //
+        // Two hard-won constraints shape what this is allowed to do.
+        //
+        // It must never seek. The first version trimmed the buffer down to
+        // its last 5 seconds and then jumped `currentTime` onto that new
+        // start — which lands mid-GOP, and a decoder handed a non-keyframe
+        // start gives up. Reproduced directly against this setup's 4K HEVC
+        // camera: with the seek, playback dies after ~100 frames with
+        // `PIPELINE_ERROR_DECODE … VTDecompressionOutputCallback -12909`
+        // and the element goes black for good; with the seek removed and
+        // everything else identical, the same stream runs clean. Closing a
+        // gap is `playbackRate`'s job, gently — go2rtc's own reference
+        // client (www/video-rtc.js) likewise never seeks a live stream.
+        //
+        // It must never trim ahead of the playhead, only behind it, for the
+        // same reason: whatever remains has to still start at a point the
+        // decoder can enter.
+        //
+        // The trim also gets its own try block. On WebKit `remove()` throws
+        // a bare `TypeError: Type error` here, because a live go2rtc fMP4
+        // declares `mvhd duration = 0` (confirmed by parsing the actual
+        // init segment off the wire) and MediaSource.duration is left unset,
+        // which remove() rejects outright. It used to share one try with
+        // the rate adjustment below, so that throw skipped the only lines
+        // that did any catching up at all. Handing the MediaSource the
+        // Infinity duration a live stream should report anyway is what lets
+        // the trim itself succeed.
         const catchUpToLiveEdge = () => {
           if (token !== this._liveToken || !sourceBuffer || sourceBuffer.updating) return;
           const buffered = sourceBuffer.buffered;
           if (!buffered?.length) return;
+          const end = buffered.end(buffered.length - 1);
           try {
-            const end = buffered.end(buffered.length - 1);
-            const start = end - 5;
+            if (Number.isNaN(ms.duration) && ms.readyState === "open") ms.duration = Infinity;
             const start0 = buffered.start(0);
-            if (start > start0) {
-              sourceBuffer.remove(start0, start);
-              if (ms.readyState === "open") ms.setLiveSeekableRange(start, end);
-            }
-            if (video.currentTime < start) video.currentTime = start;
+            // Only what has already been played, and never the last 10s.
+            const cutoff = Math.min(video.currentTime - 2, end - 10);
+            if (cutoff > start0 + 1) sourceBuffer.remove(start0, cutoff);
+          } catch (_) {
+            // Best-effort housekeeping — go2rtc's own client swallows this
+            // identically. Never let it block the rate adjustment below.
+          }
+          try {
+            // Ramps to at most 1.5x, so a second of lag takes a few seconds
+            // to absorb instead of being yanked out in one frame. Anything
+            // sharper is visible on screen and buys nothing on a live view.
             const gap = end - video.currentTime;
-            video.playbackRate = gap > 0.1 ? Math.min(gap, 2) : 1;
+            video.playbackRate = gap > 1 ? Math.min(1 + (gap - 1) * 0.25, 1.5) : 1;
           } catch (err) {
             console.warn("[frigate-timeline-card] live-edge catch-up failed", err);
           }
@@ -1280,9 +1396,29 @@ class FrigateTimelineCard extends HTMLElement {
         const ws = new WebSocket(wsUrl);
         ws.binaryType = "arraybuffer";
         this._rtcWebSocket = ws;
+        let openedAt = 0;
+
+        // A decode error kills the element for good — `readyState` drops
+        // back to HAVE_METADATA and no further append changes anything, so
+        // the card just sits black with the WebSocket still happily
+        // streaming into a dead MediaSource. Nothing used to notice: the
+        // only recovery path was ws.onclose, and the socket never closed.
+        // Routing it through a non-1000 close reuses that one retry path,
+        // which rebuilds the MediaSource from a fresh init segment.
+        const onMediaError = () => {
+          if (token !== this._liveToken) return;
+          console.warn("[frigate-timeline-card] live <video> error — reconnecting", video.error);
+          try {
+            ws.close(4001);
+          } catch (_) {
+            /* already closing — onclose still runs */
+          }
+        };
+        video.addEventListener("error", onMediaError);
 
         ws.onopen = () => {
           if (token !== this._liveToken) return;
+          openedAt = Date.now();
           // go2rtc's documented example list includes "flac" — dropped
           // here. Confirmed root cause of two cameras staying black with
           // no visible error (see _showLiveViaGo2rtc's own history/commit
@@ -1362,18 +1498,32 @@ class FrigateTimelineCard extends HTMLElement {
           if (token === this._liveToken) console.warn("[frigate-timeline-card] go2rtc MSE WS error");
         };
         ws.onclose = (e) => {
+          video.removeEventListener("error", onMediaError);
           if (e.code === 1000 || token !== this._liveToken) return;
           console.warn(`[frigate-timeline-card] go2rtc MSE WS closed unexpectedly (code ${e.code})`, {
             attempt,
             gotData,
           });
-          if (attempt < MAX_ATTEMPTS) {
+          // Repeatedly never got a byte through Home Assistant's proxy —
+          // most likely it isn't there at all (no Frigate integration), so
+          // spend the remaining attempts going direct instead. Not on the
+          // first failure: attempt 0 dying before it delivers anything is
+          // the ordinary mount race described above, not a missing proxy.
+          if (viaProxy && !gotData && attempt >= 2) this._proxyLiveUnavailable = true;
+          // A connection that ran fine for a while and then broke is a new
+          // incident, not the continuation of a failing series — it starts
+          // its own attempt count. Without this, a dashboard left open all
+          // day burns its five attempts on five unrelated blips hours apart
+          // and then stays black until someone reloads.
+          const healthy = gotData && openedAt && Date.now() - openedAt > 30000;
+          const next = healthy ? 0 : attempt + 1;
+          if (healthy || attempt < MAX_ATTEMPTS) {
             // A connection that had already started delivering data and
             // then dropped waits a bit longer (real network hiccup) than
             // one that never got going at all (the early-teardown race —
             // retry fast, the next attempt usually just works).
             const delayMs = gotData ? Math.min(1000 * 2 ** attempt, 8000) : 300 * (attempt + 1);
-            setTimeout(() => connect(attempt + 1), delayMs);
+            setTimeout(() => connect(next), delayMs);
           } else {
             this._showStageError(this._t("liveFrigateError"));
           }
@@ -1504,15 +1654,45 @@ class FrigateTimelineCard extends HTMLElement {
       { once: true }
     );
 
-    video.src = canPlayNativeHls ? hlsUrl : mp4Url;
     this._stageEl.appendChild(video);
     this._bindVideoControls(video);
 
-    // Best-effort correction, fired in parallel — never awaited before
-    // starting playback above, since delaying video creation would push it
-    // outside the synchronous click handler and risk losing the user-
-    // gesture autoplay-with-sound allowance.
+    // The source is resolved asynchronously so it can go through Home
+    // Assistant's Frigate proxy — same-origin, and reachable from wherever
+    // Home Assistant itself is, unlike Frigate's own LAN address (which a
+    // phone on Tailscale or any https front end cannot load). Stepping out
+    // of the click handler is safe here: this element autoplays *muted*,
+    // which never requires a user gesture. Unmuting does, and that is its
+    // own later button press.
+    //
+    // Through the proxy every browser gets the progressive clip.mp4 —
+    // including the Safari/iOS ones that would otherwise prefer native
+    // HLS. A signed Home Assistant path authorizes exactly one URL, and an
+    // .m3u8's segments are separate URLs the player derives on its own, so
+    // they would arrive unsigned and be rejected. A single signed MP4 URL,
+    // whose range requests reuse that same URL query and all, is the only
+    // shape that survives. The direct URLs remain the fallback for setups
+    // without the Frigate HA integration.
+    const clipToken = this._playingClip;
+    this._resolveClipSrc(camId, startSec, endSec, canPlayNativeHls ? hlsUrl : mp4Url).then((src) => {
+      if (this._playingClip === clipToken) video.src = src;
+    });
+
+    // Best-effort correction, fired in parallel and never awaited — it only
+    // adjusts the pill's clock, and playback must not wait on it.
     this._correctClipStartSec(camId, base, startSec);
+  }
+
+  /** Signed same-origin URL for the recorded clip, falling back to the
+   * direct Frigate URL when there is no Home Assistant connection to sign
+   * with (or the integration isn't installed). See _playAt for why this is
+   * the MP4 endpoint rather than the HLS one. */
+  async _resolveClipSrc(camId, startSec, endSec, directUrl) {
+    const signed = await this._signHaPath(
+      `${this._frigateProxyPath()}/recording/${encodeURIComponent(camId)}/start/${startSec}/end/${endSec}`,
+      3600
+    );
+    return signed || directUrl;
   }
 
   /**
@@ -1525,20 +1705,40 @@ class FrigateTimelineCard extends HTMLElement {
    * overlay. Fetches the real segment list around the requested time and
    * corrects `_clipStartSec` to the segment's true `start_time` once known.
    *
-   * Best-effort: many self-hosted Frigate instances don't send
-   * `Access-Control-Allow-Origin` (the same CORS gap that broke direct clip
-   * playback before the native-`<video>` fix), so this REST call can fail —
-   * caught and silently ignored, leaving the original requested-time
-   * approximation in place.
+   * Goes through Home Assistant's `frigate/recordings/get` rather than
+   * Frigate's own `/<camera>/recordings` REST endpoint: the direct call is
+   * cross-origin and Frigate sends no `Access-Control-Allow-Origin`, so it
+   * was blocked on every single click (one red console error each) and the
+   * correction never actually happened. Direct REST is kept only as a
+   * fallback for setups without the Frigate HA integration, where it is
+   * still best-effort and still silently ignored on failure.
    */
   async _correctClipStartSec(camId, base, requestedStartSec) {
     const clipToken = this._playingClip;
     try {
       const after = requestedStartSec - 1;
       const before = requestedStartSec + 11; // ~one segment of margin either side
-      const res = await fetch(`${base}/${camId}/recordings?after=${after}&before=${before}`);
-      if (!res.ok) return;
-      const segments = await res.json();
+      let segments = null;
+      if (this._hass?.connection) {
+        try {
+          let wsSegments = await this._hass.connection.sendMessagePromise({
+            type: "frigate/recordings/get",
+            instance_id: this._config.frigate_instance_id,
+            camera: camId,
+            after,
+            before,
+          });
+          if (typeof wsSegments === "string") wsSegments = JSON.parse(wsSegments);
+          if (Array.isArray(wsSegments)) segments = wsSegments;
+        } catch (err) {
+          console.warn("[frigate-timeline-card] WS frigate/recordings/get failed", err);
+        }
+      }
+      if (!Array.isArray(segments)) {
+        const res = await fetch(`${base}/${camId}/recordings?after=${after}&before=${before}`);
+        if (!res.ok) return;
+        segments = await res.json();
+      }
       if (this._playingClip !== clipToken) return; // superseded by a newer seek/live
       if (!Array.isArray(segments) || !segments.length) return;
       let best = null;
@@ -1613,15 +1813,43 @@ class FrigateTimelineCard extends HTMLElement {
       }
     }
 
-    // /api/review has no WS equivalent — REST is the only source for exact
-    // severity. Falls back to approximating from `events` (already fetched
-    // above, WS-first) when REST is unreachable.
+    // Review data (exact per-segment severity, which the event list can
+    // only approximate). Same WS-first priority as events above:
+    // `frigate/reviews/get` goes through Home Assistant's own connection,
+    // so it is reachable however the dashboard itself is being served.
+    //
+    // This used to be REST-only, on the belief that /api/review had no WS
+    // equivalent. It does — the Frigate integration has shipped
+    // `frigate/reviews/get` for a long time — and the REST call it replaces
+    // could never have worked from a browser in the first place: Frigate
+    // sends no `Access-Control-Allow-Origin` on /api/review, so every load
+    // of this card spent a request getting CORS-blocked (a red console
+    // error per card, per day-window) and then silently fell back to
+    // approximating severity from labels.
     let reviews = null;
-    try {
-      const res = await fetch(`${base}/api/review?after=${afterSec}&before=${beforeSec}`);
-      if (res.ok) reviews = await res.json();
-    } catch (err) {
-      console.warn("[frigate-timeline-card] REST /api/review unavailable (CORS or mixed-content) — approximating from events", err);
+    if (this._hass?.connection) {
+      try {
+        let wsReviews = await this._hass.connection.sendMessagePromise({
+          type: "frigate/reviews/get",
+          instance_id: this._config.frigate_instance_id,
+          ...(camId ? { cameras: [camId] } : {}),
+          after: afterSec,
+          before: beforeSec,
+          limit: 500,
+        });
+        if (typeof wsReviews === "string") wsReviews = JSON.parse(wsReviews);
+        if (Array.isArray(wsReviews)) reviews = wsReviews;
+      } catch (err) {
+        console.warn("[frigate-timeline-card] WS frigate/reviews/get failed", err);
+      }
+    }
+    if (!Array.isArray(reviews)) {
+      try {
+        const res = await fetch(`${base}/api/review?after=${afterSec}&before=${beforeSec}`);
+        if (res.ok) reviews = await res.json();
+      } catch (err) {
+        console.warn("[frigate-timeline-card] REST /api/review unavailable (CORS or mixed-content) — approximating from events", err);
+      }
     }
 
     if (this._fetchKey !== key) return; // a newer fetch superseded this one

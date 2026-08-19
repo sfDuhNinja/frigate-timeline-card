@@ -8,7 +8,10 @@ cd "$(dirname "$0")"
 
 {
   echo "/* hls.js (vendored, light build) — see vendor/hls.min.js for its own license header */"
-  cat vendor/hls.min.js
+  # Drop the bundle's trailing `//# sourceMappingURL=` line: we ship the
+  # minified file alone, so browsers were chasing a .map that doesn't exist
+  # next to the installed card and logging a source-map load error for it.
+  sed -e 's|^//# sourceMappingURL=.*$||' vendor/hls.min.js
   echo
   echo "/* frigate-timeline-card — see src/frigate-timeline-card.js */"
   cat src/frigate-timeline-card.js

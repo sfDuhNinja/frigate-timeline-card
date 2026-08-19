@@ -11,7 +11,7 @@ A minimal Home Assistant Lovelace card: a live camera view plus a horizontal, Fr
 - **Horizontal event timeline** below the live view, styled as a histogram: gold bars for detections, taller red bars for alerts, with a live red "now" pill (updating every second) and a dashed guideline.
 - **Zoom & pan** on the timeline — mouse wheel or +/− buttons on desktop, two-finger pinch on mobile/tablet; drag to pan once zoomed in.
 - **Tap/click a bar** (or anywhere on the timeline) to play the nearest recorded clip inline; a "● LIVE" button returns to the live stream.
-- Review/event data is fetched via Frigate's REST `/api/review` and `/api/events` when `frigate_url` is reachable from the browser, with an automatic fallback to Home Assistant's Frigate integration websocket bridge (`frigate/events/get`) when it isn't (common — many Frigate deployments don't send CORS headers).
+- Review/event/recording data is fetched over Home Assistant's own websocket via the Frigate integration (`frigate/events/get`, `frigate/reviews/get`, `frigate/recordings/get`), with Frigate's REST endpoints kept only as a fallback for setups without that integration. Direct REST is a fallback rather than the primary path because Frigate sends no CORS headers, so a browser is blocked from reading those responses cross-origin.
 
 ## Installation (HACS)
 
@@ -30,7 +30,7 @@ frigate_instance_id: frigate            # optional — Frigate HA integration co
 height: 44                              # optional — timeline strip height in px
 default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default: 10)
 auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default: 0, disabled)
-live_source: ha                         # optional — "ha" (default) or "frigate" (direct go2rtc MSE, bypasses HA's WebRTC bridge)
+live_source: ha                         # optional — "ha" (default) or "frigate" (go2rtc MSE via HA's Frigate proxy)
 go2rtc_url: http://192.168.1.11:1984    # optional — only used when live_source: frigate; defaults to the frigate_url host on port 1984
 frigate_stream: main                    # optional — only used when live_source: frigate; go2rtc stream suffix, "main" or "sub"
 ```
@@ -46,8 +46,8 @@ A visual editor is also available (entity picker + form fields) when adding the 
 | `height` | no | `44` | Timeline strip height in pixels |
 | `default_zoom_hours` | no | `10` | Initial timeline zoom window, in hours (0.25–24) |
 | `auto_hide_seconds` | no | `0` | Auto-collapses the timeline after this many seconds of no interaction; `0` disables it |
-| `live_source` | no | `ha` | `ha` uses `ha-camera-stream` (recommended — same-origin, no mixed-content risk); `frigate` connects straight to Frigate's own go2rtc over MSE (WebSocket-delivered fMP4 — more tolerant of tunneled paths like Tailscale than WebRTC's real-time UDP), bypassing HA's WebRTC bridge — opt-in, since it reintroduces the mixed-content failure mode `ha` avoids on https dashboards |
-| `go2rtc_url` | no | Frigate host on port `1984` | Only used when `live_source: frigate`; overrides go2rtc's address when it differs from the default |
+| `live_source` | no | `ha` | `ha` uses `ha-camera-stream`; `frigate` uses Frigate's own go2rtc over MSE (WebSocket-delivered fMP4 — more tolerant of tunneled paths like Tailscale than WebRTC's real-time UDP), reached through the Frigate integration's proxy so it stays same-origin with the dashboard |
+| `go2rtc_url` | no | Frigate host on port `1984` | Only used when `live_source: frigate`, and only needed for a go2rtc that isn't the one Frigate bundles. Setting it forces a direct browser→go2rtc connection instead of Home Assistant's proxy, which then has to be reachable from every device and breaks on https dashboards if it isn't TLS itself |
 | `frigate_stream` | no | `main` | Only used when `live_source: frigate`; which go2rtc stream to use, `main` (full quality) or `sub` (lighter) |
 
 ## Why this exists
