@@ -1272,23 +1272,44 @@ class FrigateTimelineCard extends HTMLElement {
         ws.onmessage = (evt) => {
           if (token !== this._liveToken) return;
           if (typeof evt.data === "string") {
+            let msg;
             try {
-              const msg = JSON.parse(evt.data);
-              if (msg.type === "mse" && !sourceBuffer) {
-                const create = () => {
-                  if (token !== this._liveToken) return;
+              msg = JSON.parse(evt.data);
+            } catch (_) {
+              return; // malformed control message — nothing to act on
+            }
+            if (msg.type === "mse" && !sourceBuffer) {
+              // Deliberately its own try/catch, separate from the
+              // JSON.parse one above — this used to share that catch
+              // block, silently swallowing addSourceBuffer() failures
+              // under a "malformed control message" comment that had
+              // nothing to do with them. That's exactly why two of three
+              // identically-configured cameras stayed black with zero
+              // console output: go2rtc offered a mime/codec string this
+              // browser rejected for that camera's stream, and the
+              // resulting exception vanished instead of surfacing.
+              const create = () => {
+                if (token !== this._liveToken) return;
+                try {
                   sourceBuffer = ms.addSourceBuffer(msg.value);
                   sourceBuffer.mode = "segments";
                   sourceBuffer.addEventListener("updateend", pump);
-                };
-                if (ms.readyState === "open") create();
-                else ms.addEventListener("sourceopen", create, { once: true });
-              } else if (msg.type === "error") {
-                console.warn("[frigate-timeline-card] go2rtc MSE error", msg.value);
-                this._showStageError(this._t("liveFrigateError"));
-              }
-            } catch (_) {
-              /* ignore malformed control message */
+                } catch (err) {
+                  console.warn(`[frigate-timeline-card] addSourceBuffer failed for mime "${msg.value}"`, err);
+                  this._showStageError(this._t("liveFrigateError"));
+                  // Nothing downstream can ever consume the queue without a
+                  // SourceBuffer — closing stops binary segments from
+                  // piling up in `queue` forever for no reason (1000, a
+                  // deliberate close, so onclose's retry logic doesn't
+                  // treat this as a network blip worth retrying).
+                  ws.close(1000);
+                }
+              };
+              if (ms.readyState === "open") create();
+              else ms.addEventListener("sourceopen", create, { once: true });
+            } else if (msg.type === "error") {
+              console.warn("[frigate-timeline-card] go2rtc MSE error", msg.value);
+              this._showStageError(this._t("liveFrigateError"));
             }
             return;
           }
