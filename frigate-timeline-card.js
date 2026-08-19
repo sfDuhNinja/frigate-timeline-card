@@ -267,9 +267,9 @@ class FrigateTimelineCard extends HTMLElement {
     this._dayKey = todayKey();
     this._segments = [];
     this._events = [];
-    this._motion = [];
+    this._recordings = [];
     this._fetchKey = null;
-    this._motionKey = null;
+    this._recordingsKey = null;
     this._resetZoom();
     this._updateDayNavState();
     if (!this._built) this._build();
@@ -686,22 +686,6 @@ class FrigateTimelineCard extends HTMLElement {
    * are loaded — used by the now-line scrub gesture so dragging lands on
    * something that actually happened instead of an arbitrary empty moment.
    * Falls back to the raw timestamp when there are no events at all. */
-  _nearestEventStartMs(ts) {
-    if (!this._events?.length) return ts;
-    let best = null;
-    let bestDist = Infinity;
-    for (const ev of this._events) {
-      const start = Number(ev.start_time) * 1000;
-      if (!Number.isFinite(start)) continue;
-      const dist = Math.abs(start - ts);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = start;
-      }
-    }
-    return best != null ? best : ts;
-  }
-
   /** Press-and-hold the dashed "now" guideline to scrub — a dedicated grab
    * handle, distinct from tapping elsewhere on the track (single seek) or
    * dragging the track itself (pans the view once zoomed in). Lives on a
@@ -729,10 +713,10 @@ class FrigateTimelineCard extends HTMLElement {
 
     const previewAt = (frac) => {
       const win = this._currentWindow();
-      // Scrubbing goes wherever you drag — free positioning, not snapped to
-      // an event. (Tap/click still snaps to the nearest event's start, via
-      // _seekTo() — that's a deliberate difference: a tap is a single
-      // decisive pick, a drag is exploratory and should go anywhere.)
+      // The preview follows the pointer freely; only the load that lands
+      // at the end of the drag is pulled onto real footage, the same way a
+      // tap is. Constraining the preview itself would make the line stick
+      // and jump under the finger.
       const ts = win.start + frac * (win.end - win.start);
       const pct = frac * 100;
       this._nowLineEl.style.display = "";
@@ -748,7 +732,7 @@ class FrigateTimelineCard extends HTMLElement {
       if (throttleTimer) return;
       throttleTimer = setTimeout(() => {
         throttleTimer = null;
-        if (lastTs != null) this._playAt(lastTs);
+        if (lastTs != null) this._playAt(this._nearestPlayableMs(lastTs));
       }, SCRUB_THROTTLE_MS);
     };
 
@@ -776,7 +760,7 @@ class FrigateTimelineCard extends HTMLElement {
         clearTimeout(throttleTimer);
         throttleTimer = null;
       }
-      if (lastTs != null) this._playAt(lastTs);
+      if (lastTs != null) this._playAt(this._nearestPlayableMs(lastTs));
     };
     this._windowDragStop = stop;
   }
@@ -1113,7 +1097,7 @@ class FrigateTimelineCard extends HTMLElement {
     if (userInitiated) this._scheduleAutoHide();
     // The motion layer is deliberately not fetched while collapsed; this is
     // where that debt comes due.
-    if (!hidden) this._ensureMotion();
+    if (!hidden) this._ensureRecordings();
   }
 
   /** Restarts the auto-hide countdown (config `auto_hide_seconds`, 0 =
@@ -1822,11 +1806,15 @@ class FrigateTimelineCard extends HTMLElement {
    * segmented/adaptive playback than the flat MP4, so it's worth trying
    * before giving up.
    */
-  _playAt(tsMs) {
+  _playAt(tsMs, { continuous = false } = {}) {
     const camId = this._cameraObjectId();
     const base = this._config.frigate_url.replace(/\/+$/, "");
     const nowSec = Math.floor(Date.now() / 1000);
-    let startSec = Math.floor(tsMs / 1000) - 20;
+    // A tap gets a short run-up so the moment you aimed at isn't already
+    // gone by the time the picture appears. A chunk continuing from the
+    // previous one must not rewind — it starts exactly where that ended.
+    const wasMuted = this._streamEl?.muted;
+    let startSec = Math.floor(tsMs / 1000) - (continuous ? 0 : 20);
     // Clamp the end a few seconds behind "now" — Frigate needs a moment to
     // finalize very recent segments, and asking for a range that partly
     // doesn't exist yet is exactly what made playback choppy/stuck when
@@ -1836,7 +1824,8 @@ class FrigateTimelineCard extends HTMLElement {
     const hlsUrl = `${base}/vod/${camId}/start/${startSec}/end/${endSec}/index.m3u8`;
     const mp4Url = `${base}/${camId}/start/${startSec}/end/${endSec}/clip.mp4`;
 
-    this._playingClip = { url: hlsUrl, tsMs };
+    const clip = { url: hlsUrl, tsMs, endSec };
+    this._playingClip = clip;
     this._pillMode = "clip";
     this._clipStartSec = startSec;
     this._clipCurrentMs = tsMs;
@@ -1848,12 +1837,21 @@ class FrigateTimelineCard extends HTMLElement {
 
     const video = document.createElement("video");
     video.autoplay = true;
-    video.muted = true; // starts muted, same as live — consistent across play/live/timeline; mute button toggles it
+    // Starts muted, same as live — except when carrying on from the
+    // previous chunk, where re-muting mid-watch would be its own bug.
+    video.muted = continuous && wasMuted !== undefined ? wasMuted : true;
     video.playsInline = true;
     video.controls = false; // controls live in the shared bar below — never native
     video.addEventListener("timeupdate", () => {
       this._clipCurrentMs = (this._clipStartSec + video.currentTime) * 1000;
       this._updateNowPill();
+    });
+    video.addEventListener("ended", () => {
+      if (this._playingClip !== clip) return;
+      // A clip that ended without ever really playing means the range came
+      // back empty; continuing from it would spin through the day at speed.
+      if (!(video.currentTime > 1)) return;
+      this._playNextChunk();
     });
 
     const canPlayNativeHls = !!video.canPlayType("application/vnd.apple.mpegurl");
@@ -1907,9 +1905,8 @@ class FrigateTimelineCard extends HTMLElement {
     // whose range requests reuse that same URL query and all, is the only
     // shape that survives. The direct URLs remain the fallback for setups
     // without the Frigate HA integration.
-    const clipToken = this._playingClip;
     this._resolveClipSrc(camId, startSec, endSec, canPlayNativeHls ? hlsUrl : mp4Url).then((src) => {
-      if (this._playingClip === clipToken) video.src = src;
+      if (this._playingClip === clip) video.src = src;
     });
 
     // Best-effort correction, fired in parallel and never awaited — it only
@@ -1997,10 +1994,75 @@ class FrigateTimelineCard extends HTMLElement {
     }
   }
 
+  /**
+   * Playback starts where the selector is. That is the whole rule, and it
+   * used not to be: taps snapped to the nearest *event*, which made every
+   * stretch of plain motion unreachable — the timeline draws it, you tap
+   * it, and playback jumps to some unrelated detection instead. Measured
+   * against a day of this setup's data, that snap moved a tap by 6.6
+   * minutes on average and by as much as three hours.
+   *
+   * The one thing this still adjusts is a tap into a gap. Frigate keeps
+   * footage only where something happened — around half a day here — so
+   * there are stretches with genuinely nothing to play, and asking for a
+   * clip there is what produced "couldn't load the clip". Those land on
+   * the nearest recorded edge instead. Anywhere the strip shows activity,
+   * the selector is taken literally.
+   */
+  _nearestPlayableMs(ts) {
+    const segments = this._recordings;
+    if (!segments?.length) return ts;
+    let best = null;
+    let bestDistance = Infinity;
+    for (const seg of segments) {
+      if (ts >= seg.start && ts <= seg.end) return ts;
+      const distance = ts < seg.start ? seg.start - ts : ts - seg.end;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = seg.start;
+      }
+    }
+    return best ?? ts;
+  }
+
+  /** Start of the next stretch of footage at or after `ts`, or null when
+   * nothing further was recorded. */
+  _nextRecordedMs(ts) {
+    let best = null;
+    for (const seg of this._recordings || []) {
+      if (seg.end <= ts) continue;
+      const candidate = Math.max(seg.start, ts);
+      if (best == null || candidate < best) best = candidate;
+    }
+    return best;
+  }
+
+  /**
+   * Keeps playback running past the end of a clip instead of stopping dead
+   * on the last frame. Each chunk is a bounded ~1min range, so watching
+   * anything longer meant tapping the timeline again and again.
+   *
+   * Jumps the gaps rather than requesting through them: Frigate only keeps
+   * footage where something happened, so the minute after a clip is often
+   * empty, and asking for it would end playback on an error instead of
+   * carrying on at the next thing worth seeing.
+   */
+  _playNextChunk() {
+    const clip = this._playingClip;
+    if (!clip) return;
+    const fromMs = clip.endSec * 1000;
+    // Stop at the live edge — the last few seconds aren't finalised yet,
+    // and the Live button is the right way back to the present anyway.
+    if (fromMs >= Date.now() - 10000) return;
+    const resume = this._recordings?.length ? this._nextRecordedMs(fromMs) : fromMs;
+    if (resume == null) return;
+    this._playAt(resume, { continuous: true });
+  }
+
   _seekTo(frac) {
     const win = this._currentWindow();
     const raw = win.start + frac * (win.end - win.start);
-    this._playAt(this._nearestEventStartMs(raw));
+    this._playAt(this._nearestPlayableMs(raw));
   }
 
   async _ensureData() {
@@ -2124,7 +2186,7 @@ class FrigateTimelineCard extends HTMLElement {
       });
     }
     this._renderTimeline();
-    this._ensureMotion();
+    this._ensureRecordings();
   }
 
   /**
@@ -2142,14 +2204,14 @@ class FrigateTimelineCard extends HTMLElement {
    * collapsed — and enough to be worth its own cache key, so expanding the
    * strip doesn't re-fetch the events and reviews alongside it.
    */
-  async _ensureMotion() {
-    if (this._config.show_motion === false || this._timelineHidden) return;
+  async _ensureRecordings() {
+    if (this._timelineHidden) return;
     const win = dayWindow(this._dayKey);
     if (!Number.isFinite(win.start)) return;
     const camId = this._cameraObjectId();
     const key = `${this._dayKey}|${camId}`;
-    if (this._motionKey === key) return;
-    this._motionKey = key;
+    if (this._recordingsKey === key) return;
+    this._recordingsKey = key;
 
     const afterSec = Math.floor(win.start / 1000);
     const beforeSec = Math.ceil(win.end / 1000);
@@ -2178,15 +2240,14 @@ class FrigateTimelineCard extends HTMLElement {
         console.warn("[frigate-timeline-card] recordings unavailable — no motion layer", err);
       }
     }
-    if (this._motionKey !== key) return; // superseded
-    this._motion = (Array.isArray(segments) ? segments : [])
+    if (this._recordingsKey !== key) return; // superseded
+    this._recordings = (Array.isArray(segments) ? segments : [])
       .filter((seg) => Number.isFinite(Number(seg.start_time)))
       .map((seg) => ({
         start: Number(seg.start_time) * 1000,
         end: Number.isFinite(Number(seg.end_time)) ? Number(seg.end_time) * 1000 : Number(seg.start_time) * 1000 + 10000,
         score: Number(seg.motion) || 0,
-      }))
-      .filter((seg) => seg.score > 0);
+      }));
     this._renderTimeline();
   }
 
@@ -2249,7 +2310,7 @@ class FrigateTimelineCard extends HTMLElement {
       }
     }
 
-    if (this._config.show_motion !== false && this._motion?.length) {
+    if (this._config.show_motion !== false && this._recordings?.length) {
       // One bar per pixel of track, carrying the loudest score that falls
       // in it. A day is thousands of segments against a few hundred pixels
       // — without bucketing they would be sub-pixel slivers fighting over
@@ -2258,7 +2319,8 @@ class FrigateTimelineCard extends HTMLElement {
       const buckets = Math.max(60, Math.min(600, Math.round(this._trackEl.clientWidth) || 300));
       const peaks = new Float64Array(buckets);
       let max = 0;
-      for (const m of this._motion) {
+      for (const m of this._recordings) {
+        if (!m.score) continue;
         if (m.end <= win.start || m.start >= win.end) continue;
         const from = Math.max(0, Math.floor(((m.start - win.start) / span) * buckets));
         const to = Math.min(buckets - 1, Math.floor(((m.end - win.start) / span) * buckets));

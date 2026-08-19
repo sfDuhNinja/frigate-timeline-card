@@ -69,6 +69,8 @@ The strip is layered the way Frigate's own timeline reads:
 
 Red tracks people rather than Frigate's `alert` severity, because the two are not the same thing. Over a measured day on a three-camera setup, 97 review segments contained a person but only 68 were alerts — a severity-driven red would have missed 29 of them — while 34 alerts were cats.
 
+Tapping or scrubbing plays from where the selector is, with no snapping to events. The one adjustment is a tap into a gap: Frigate keeps footage only where something happened — around half a day on these cameras — so those land on the nearest recorded edge rather than failing to load. When a clip reaches its end, playback carries on into the next stretch of footage, jumping the gaps, until it catches up with live.
+
 Set `show_motion: false` to drop the histogram. Colors are theme variables: `--frigate-timeline-motion`, `--frigate-timeline-detect`, `--frigate-timeline-alert`.
 
 ## Resource use
