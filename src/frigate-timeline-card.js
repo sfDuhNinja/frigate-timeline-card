@@ -68,6 +68,7 @@
  *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id, for the events WS call (default "frigate")
  *   height: 44                              # optional — timeline strip height in px
  *   show_motion: true                       # optional — draw the white motion histogram behind the activity bands (default true)
+ *   pause_offscreen: true                   # optional — stop the live stream while the card is scrolled out of view or the app is in the background (default true)
  *   default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default 10)
  *   auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default 0 = disabled)
  *   live_source: ha                         # optional — "ha" (default, via ha-camera-stream) or "frigate" (go2rtc MSE through HA's Frigate proxy, bypassing HA's WebRTC bridge)
@@ -89,6 +90,9 @@ const CATCH_UP_INTERVAL_MS = 1000;
 const MOTION_MAX_HEIGHT_PCT = 62;
 /** How much footage one clip request covers, forward from the tap. */
 const CLIP_WINDOW_SEC = 60;
+/** How long a card stays streaming after it leaves the screen, so a scroll
+ * straight past doesn't tear the stream down and rebuild it. */
+const OFFSCREEN_GRACE_MS = 2500;
 /** Room kept to the right of "now" so its pill sits inside the strip
  * rather than hanging off the end. In pixels, converted to time per zoom
  * level: a fixed number of minutes is a different amount of screen at
@@ -220,7 +224,7 @@ class FrigateTimelineCard extends HTMLElement {
     // remove the exact same references. They dispatch into whatever the
     // scrub wiring installed, which keeps that logic where it reads best
     // while still leaving one pair of listeners to detach.
-    this._onVisibilityChange = () => (document.hidden ? this._suspendLive() : this._resumeLive());
+    this._onVisibilityChange = () => this._updateLiveActivity();
     this._onWindowPointerMove = (e) => this._windowDragMove?.(e);
     this._onWindowPointerUp = () => this._windowDragStop?.();
   }
@@ -268,7 +272,7 @@ class FrigateTimelineCard extends HTMLElement {
     if (config.live_source !== "frigate" && !config.camera_entity) {
       throw new Error("frigate-timeline-card: 'camera_entity' is required (for live view via ha-camera-stream)");
     }
-    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "main", show_motion: true, ...config };
+    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "main", show_motion: true, pause_offscreen: true, ...config };
     this._dayKey = todayKey();
     this._segments = [];
     this._events = [];
@@ -344,6 +348,26 @@ class FrigateTimelineCard extends HTMLElement {
     // rebuild — so the clock reads live seconds like the reference UI.
     this._clockInterval = setInterval(() => this._updateNowPill(), 1000);
     document.addEventListener("visibilitychange", this._onVisibilityChange);
+    // Scrolled out of sight is as good a reason to stop decoding as the
+    // app being in the background. On a phone only one of these cards fits
+    // on screen at a time, so without this a three-camera view decodes
+    // three streams to show one — which on this setup is two 4K HEVC feeds
+    // running for nothing.
+    //
+    // The margin starts the stream slightly before the card is actually
+    // reached, so scrolling to it doesn't land on a frozen frame.
+    if (this._config?.pause_offscreen !== false && "IntersectionObserver" in window) {
+      this._viewObserver = new IntersectionObserver(
+        (entries) => {
+          const onScreen = entries.some((entry) => entry.isIntersecting);
+          if (onScreen === this._onScreen) return;
+          this._onScreen = onScreen;
+          this._updateLiveActivity();
+        },
+        { rootMargin: "250px 0px" }
+      );
+      this._viewObserver.observe(this);
+    }
     // Drag tracking has to live on `window`, not the track: a pointer that
     // leaves the element mid-drag still has to be followed. Bound here
     // rather than in _build() so it can be unbound on disconnect — _build()
@@ -353,7 +377,7 @@ class FrigateTimelineCard extends HTMLElement {
     window.addEventListener("pointermove", this._onWindowPointerMove);
     window.addEventListener("pointerup", this._onWindowPointerUp);
     window.addEventListener("pointercancel", this._onWindowPointerUp);
-    if (this._built && this._liveSuspended && !document.hidden) this._resumeLive();
+    if (this._built && this._liveSuspended) this._updateLiveActivity();
   }
 
   disconnectedCallback() {
@@ -366,6 +390,12 @@ class FrigateTimelineCard extends HTMLElement {
       this._clockInterval = null;
     }
     document.removeEventListener("visibilitychange", this._onVisibilityChange);
+    this._viewObserver?.disconnect();
+    this._viewObserver = null;
+    if (this._suspendTimer) {
+      clearTimeout(this._suspendTimer);
+      this._suspendTimer = null;
+    }
     window.removeEventListener("pointermove", this._onWindowPointerMove);
     window.removeEventListener("pointerup", this._onWindowPointerUp);
     window.removeEventListener("pointercancel", this._onWindowPointerUp);
@@ -389,6 +419,31 @@ class FrigateTimelineCard extends HTMLElement {
    * by simply locking the phone. Nothing to catch up to if the stream was
    * never left running.
    */
+  /**
+   * Single decision point for whether this card should be streaming at all:
+   * the page has to be in front, and the card has to be on screen.
+   *
+   * Stopping is delayed a couple of seconds, starting is not. Scrolling
+   * past a card shouldn't tear its stream down and rebuild it in the time
+   * it takes a thumb to swipe by, but arriving at one should show a picture
+   * as soon as possible.
+   */
+  _updateLiveActivity() {
+    const shouldStream = !document.hidden && this._onScreen !== false;
+    if (this._suspendTimer) {
+      clearTimeout(this._suspendTimer);
+      this._suspendTimer = null;
+    }
+    if (shouldStream) {
+      this._resumeLive();
+      return;
+    }
+    this._suspendTimer = setTimeout(() => {
+      this._suspendTimer = null;
+      this._suspendLive();
+    }, OFFSCREEN_GRACE_MS);
+  }
+
   _suspendLive() {
     if (this._liveSuspended || this._playingClip || !this._built) return;
     this._liveSuspended = true;
