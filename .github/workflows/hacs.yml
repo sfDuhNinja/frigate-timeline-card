@@ -1,0 +1,24 @@
+# HACS won't accept a repository into its default store until this passes,
+# and it re-checks on a schedule rather than only at submission time — so a
+# repository that drifts out of compliance later finds out on its own.
+name: HACS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: HACS validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: HACS Action
+        uses: hacs/action@main
+        with:
+          # Lovelace cards are "plugin" to HACS, whatever the UI calls them.
+          category: plugin
