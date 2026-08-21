@@ -95,6 +95,23 @@ const CATCH_UP_INTERVAL_MS = 1000;
 const MOTION_MAX_HEIGHT_PCT = 62;
 /** How much footage one clip request covers, forward from the tap. */
 const CLIP_WINDOW_SEC = 60;
+/**
+ * What we tell go2rtc we can play. It answers with one mime string pairing
+ * a video codec with an audio one, and that pairing is not always something
+ * the engine will actually accept — so the audio codecs are offered, and
+ * dropped only if the engine rejects the answer (see the mse handler).
+ *
+ * `flac` is how go2rtc carries a camera's G.711 audio into fMP4, and these
+ * cameras send PCMA. Offering it used to be unconditional, which left two
+ * of three cameras black on WebKit: their video is H.265, go2rtc paired it
+ * with flac, and Safari rejects `hvc1…,flac` outright. Dropping flac fixed
+ * the black picture and silently removed the only route to audio those
+ * cameras had. Chromium, for what it's worth, accepts every combination —
+ * which is exactly why this can't be decided by a hard-coded list.
+ */
+const MSE_CODECS_WITH_AUDIO =
+  "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0,mp4a.40.2,mp4a.40.5,opus,flac";
+const MSE_CODECS_VIDEO_ONLY = "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0";
 /** Rendered width, in device pixels, at which `frigate_stream: auto`
  * switches from the sub stream to the main one — the sub stream's own
  * width, below which main resolves detail the element cannot show. */
@@ -1821,7 +1838,7 @@ class FrigateTimelineCard extends HTMLElement {
           ws.send(
             JSON.stringify({
               type: "mse",
-              value: "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0,mp4a.40.2,mp4a.40.5,opus",
+              value: this._muteToPlay ? MSE_CODECS_VIDEO_ONLY : MSE_CODECS_WITH_AUDIO,
             })
           );
         };
@@ -1844,6 +1861,26 @@ class FrigateTimelineCard extends HTMLElement {
               // console output: go2rtc offered a mime/codec string this
               // browser rejected for that camera's stream, and the
               // resulting exception vanished instead of surfacing.
+              // Ask the engine about the pairing go2rtc actually chose,
+              // rather than pre-guessing which codecs are safe. A rejected
+              // mime that carries audio is worth one more try without it —
+              // silent beats black. A rejected video-only mime is the end
+              // of the road and says so.
+              if (!MediaSourceClass.isTypeSupported(msg.value)) {
+                if (!this._muteToPlay && /(flac|opus|mp4a)/.test(msg.value)) {
+                  this._muteToPlay = true;
+                  console.warn(
+                    `[frigate-timeline-card] engine rejects "${msg.value}" — reconnecting without audio`
+                  );
+                  ws.close();
+                  return;
+                }
+                console.warn(`[frigate-timeline-card] engine rejects "${msg.value}"`);
+                fatal = true;
+                this._showStageError(this._t("liveFrigateError"));
+                ws.close(1000);
+                return;
+              }
               const create = () => {
                 if (token !== this._liveToken) return;
                 try {
