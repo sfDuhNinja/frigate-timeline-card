@@ -1664,6 +1664,13 @@ class FrigateTimelineCard extends HTMLElement {
           try {
             if (Number.isNaN(ms.duration) && ms.readyState === "open") ms.duration = Infinity;
             const start0 = buffered.start(0);
+            // The other half of looking like a live stream: a seekable
+            // range that tracks the live edge rather than growing from
+            // zero. Without it the platform player treats everything
+            // buffered since the connection opened as a timeline to scrub,
+            // which is what turns its readout into a counter. Restored
+            // here — the catch-up rewrite in v1.17.0 dropped it.
+            if (ms.readyState === "open") ms.setLiveSeekableRange(start0, end);
             // Only what has already been played, and never the last 10s.
             const cutoff = Math.min(video.currentTime - 2, end - 10);
             if (cutoff > start0 + 1) sourceBuffer.remove(start0, cutoff);
@@ -1837,6 +1844,16 @@ class FrigateTimelineCard extends HTMLElement {
                 try {
                   sourceBuffer = ms.addSourceBuffer(msg.value);
                   sourceBuffer.mode = "segments";
+                  // Declare the stream endless before a single frame is
+                  // appended. A MediaSource whose duration is a number is a
+                  // recording as far as the platform player is concerned,
+                  // and Apple's fullscreen controls will show an elapsed
+                  // time climbing from zero for it; an infinite duration is
+                  // what makes them show LIVE instead. Doing it here rather
+                  // than on the first updateend means the element is never
+                  // briefly a finite-length video, which is the state the
+                  // native controls latch onto when they are opened early.
+                  if (ms.readyState === "open") ms.duration = Infinity;
                   sourceBuffer.addEventListener("updateend", pump);
                   sourceBuffer.addEventListener("updateend", catchUpToLiveEdge);
                 } catch (err) {
