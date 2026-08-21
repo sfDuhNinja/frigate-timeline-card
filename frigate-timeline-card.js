@@ -78,7 +78,7 @@
  *   auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default 0 = disabled)
  *   live_source: ha                         # optional — "ha" (default, via ha-camera-stream) or "frigate" (go2rtc MSE through HA's Frigate proxy, bypassing HA's WebRTC bridge)
  *   go2rtc_url: http://192.168.1.11:1984    # optional — only used when live_source: frigate; forces a direct connection to a go2rtc that isn't the one Frigate bundles (skips HA's proxy, so mixed-content/reachability caveats come back)
- *   frigate_stream: main                    # optional — only used when live_source: frigate; go2rtc stream suffix, "main" or "sub" (default "main")
+ *   frigate_stream: auto                    # optional — only used when live_source: frigate; "auto" (default — sub stream unless the card is rendered wide enough to show more), "main" or "sub"
  */
 
 const PLAYHEAD_TICK_MS = 60 * 1000;
@@ -95,6 +95,10 @@ const CATCH_UP_INTERVAL_MS = 1000;
 const MOTION_MAX_HEIGHT_PCT = 62;
 /** How much footage one clip request covers, forward from the tap. */
 const CLIP_WINDOW_SEC = 60;
+/** Rendered width, in device pixels, at which `frigate_stream: auto`
+ * switches from the sub stream to the main one — the sub stream's own
+ * width, below which main resolves detail the element cannot show. */
+const AUTO_MAIN_MIN_DEVICE_PX = 1280;
 /** How long a card stays streaming after it leaves the screen, so a scroll
  * straight past doesn't tear the stream down and rebuild it. */
 const OFFSCREEN_GRACE_MS = 2500;
@@ -277,7 +281,7 @@ class FrigateTimelineCard extends HTMLElement {
     if (config.live_source !== "frigate" && !config.camera_entity) {
       throw new Error("frigate-timeline-card: 'camera_entity' is required (for live view via ha-camera-stream)");
     }
-    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "main", show_motion: true, pause_offscreen: true, ...config };
+    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "auto", show_motion: true, pause_offscreen: true, ...config };
     this._dayKey = todayKey();
     this._segments = [];
     this._events = [];
@@ -321,17 +325,15 @@ class FrigateTimelineCard extends HTMLElement {
       }
     }
     if (first) this._ensureData();
-    // Lovelace calls this setter on every state-changed event across the
-    // whole dashboard, which can be several times a second. Rebuilding the
-    // track's DOM that often is wasted work and — combined with an
-    // in-progress gesture — is what caused the original tap-does-nothing
-    // bug on iOS. The 60s interval in connectedCallback still guarantees
-    // the playhead advances even with no other hass traffic.
-    const now = Date.now();
-    if (now - (this._lastRenderTs || 0) > 3000) {
-      this._lastRenderTs = now;
-      this._renderTimeline();
-    }
+    // Deliberately nothing else here. Lovelace calls this setter on every
+    // state-changed event across the whole dashboard, several times a
+    // second, and this used to rebuild the strip's DOM on a 3-second
+    // throttle off the back of it. That work was never needed: the strip's
+    // data only changes when the day does, the clock is the pill's own
+    // per-second job, and the window's slow drift is what the 60-second
+    // tick is for. It cost three DOM rebuilds every three seconds, forever,
+    // to redraw an identical picture — and rebuilding mid-gesture is what
+    // caused the original tap-does-nothing bug on iOS.
   }
 
   static getConfigElement() {
@@ -368,10 +370,27 @@ class FrigateTimelineCard extends HTMLElement {
           if (onScreen === this._onScreen) return;
           this._onScreen = onScreen;
           this._updateLiveActivity();
+          if (onScreen && this._renderPending) this._renderTimeline();
         },
         { rootMargin: "250px 0px" }
       );
       this._viewObserver.observe(this);
+    }
+    // The auto stream choice depends on rendered size, and rendered size
+    // isn't known at the first connect — the card may not be laid out yet,
+    // and it changes again on fullscreen or a window resize. Re-check when
+    // it moves, and only reconnect when the answer actually differs.
+    if (this._config?.frigate_stream === "auto" && "ResizeObserver" in window) {
+      this._sizeObserver = new ResizeObserver(() => {
+        clearTimeout(this._sizeTimer);
+        this._sizeTimer = setTimeout(() => {
+          if (this._config?.live_source !== "frigate") return;
+          if (this._playingClip || this._liveSuspended || !this._activeStreamSuffix) return;
+          if (this._resolveStreamSuffix() === this._activeStreamSuffix) return;
+          this._showLive();
+        }, 600);
+      });
+      this._sizeObserver.observe(this);
     }
     // Drag tracking has to live on `window`, not the track: a pointer that
     // leaves the element mid-drag still has to be followed. Bound here
@@ -383,6 +402,7 @@ class FrigateTimelineCard extends HTMLElement {
     window.addEventListener("pointerup", this._onWindowPointerUp);
     window.addEventListener("pointercancel", this._onWindowPointerUp);
     if (this._built && this._liveSuspended) this._updateLiveActivity();
+    if (this._renderPending) this._renderTimeline();
   }
 
   disconnectedCallback() {
@@ -397,6 +417,9 @@ class FrigateTimelineCard extends HTMLElement {
     document.removeEventListener("visibilitychange", this._onVisibilityChange);
     this._viewObserver?.disconnect();
     this._viewObserver = null;
+    this._sizeObserver?.disconnect();
+    this._sizeObserver = null;
+    clearTimeout(this._sizeTimer);
     if (this._suspendTimer) {
       clearTimeout(this._suspendTimer);
       this._suspendTimer = null;
@@ -435,6 +458,7 @@ class FrigateTimelineCard extends HTMLElement {
    */
   _updateLiveActivity() {
     const shouldStream = !document.hidden && this._onScreen !== false;
+    if (shouldStream && this._renderPending) this._renderTimeline();
     if (this._suspendTimer) {
       clearTimeout(this._suspendTimer);
       this._suspendTimer = null;
@@ -593,10 +617,9 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-band.person {
           background: var(--frigate-timeline-alert, rgba(239, 68, 68, 0.55));
         }
+        frigate-timeline-card .ftc-bands { position: absolute; inset: 0; }
         frigate-timeline-card .ftc-motion {
-          position: absolute; top: 50%; transform: translateY(-50%);
-          background: var(--frigate-timeline-motion, rgba(255, 255, 255, 0.62));
-          border-radius: 1px; pointer-events: none;
+          position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
         }
         frigate-timeline-card .ftc-now-pill {
           position: absolute; top: -22px; transform: translateX(-50%);
@@ -1223,9 +1246,12 @@ class FrigateTimelineCard extends HTMLElement {
     this._timelineEl.style.display = hidden ? "none" : "";
     if (this._timelineToggleBtn) this._timelineToggleBtn.innerHTML = hidden ? ICON_CHEVRON_DOWN : ICON_CHEVRON_UP;
     if (userInitiated) this._scheduleAutoHide();
-    // The motion layer is deliberately not fetched while collapsed; this is
-    // where that debt comes due.
-    if (!hidden) this._ensureRecordings();
+    // Both debts from not working while collapsed come due here: the motion
+    // layer was never fetched, and any render that fell due was skipped.
+    if (!hidden) {
+      this._ensureRecordings();
+      if (this._renderPending) this._renderTimeline();
+    }
   }
 
   /** Restarts the auto-hide countdown (config `auto_hide_seconds`, 0 =
@@ -1272,9 +1298,35 @@ class FrigateTimelineCard extends HTMLElement {
 
   /** go2rtc stream name for the selected Frigate camera — Frigate registers
    * both a full-res `<camera>_main` and a lighter `<camera>_sub` stream in
-   * go2rtc; `frigate_stream` picks which (default "main"). */
+   * go2rtc; `frigate_stream` picks which. */
+  /**
+   * `main` and `sub` are taken literally. `auto` — the default — picks by
+   * how big the card actually is on screen.
+   *
+   * Measured on this setup's own dashboard, the three cameras decode
+   * 3200x1800, 3840x2160 and 3840x2160 at 20-25fps: 511 megapixels a
+   * second between them, sustained, which is about sixty frames of 4K
+   * every second. Every one of those pixels was being thrown away — the
+   * cards render a few hundred pixels wide. The sub streams are 720p and
+   * cost roughly a tenth of that, with nothing visibly lost at the size
+   * they are displayed.
+   *
+   * The threshold is the sub stream's own width: below it, `sub` is
+   * already at or above what the element can show, so `main` buys
+   * literally nothing. Above it — a large desktop card, or fullscreen —
+   * `main` starts to earn its keep.
+   */
+  _resolveStreamSuffix() {
+    const configured = this._config.frigate_stream || "auto";
+    if (configured !== "auto") return configured;
+    const cssWidth = this._streamEl?.clientWidth || this._stageEl?.clientWidth || this.clientWidth || 0;
+    const devicePixels = cssWidth * Math.min(window.devicePixelRatio || 1, 3);
+    return devicePixels >= AUTO_MAIN_MIN_DEVICE_PX ? "main" : "sub";
+  }
+
   _go2rtcStreamName() {
-    const suffix = this._config.frigate_stream || "main";
+    const suffix = this._resolveStreamSuffix();
+    this._activeStreamSuffix = suffix;
     return `${this._config.frigate_camera}_${suffix}`;
   }
 
@@ -2351,7 +2403,7 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   _updateNowPill() {
-    if (document.hidden) return; // nobody is reading a clock they can't see
+    if (!this._timelineOnScreen()) return; // nobody is reading a clock they can't see
     if (!this._nowPillEl || this._scrubbing) return; // don't fight the drag preview
     const win = this._currentWindow();
     const isClip = this._pillMode === "clip";
@@ -2379,8 +2431,113 @@ class FrigateTimelineCard extends HTMLElement {
     return steps.find((s) => s >= raw) || steps[steps.length - 1];
   }
 
+  /** Whether the strip is actually on screen: the page in front, the card
+   * in the viewport, and the strip not collapsed. Rendering into any of
+   * those states is work nobody can see — and with `auto_hide_seconds` set
+   * the strip is collapsed most of the time. */
+  _timelineOnScreen() {
+    return !document.hidden && this._onScreen !== false && !this._timelineHidden;
+  }
+
+  /** Bands are a handful of elements and stay as DOM; motion is hundreds of
+   * columns and goes on a canvas. Both live in their own layer so a render
+   * can replace one without disturbing the other — or the scrub indicator,
+   * which used to be wiped by every innerHTML rebuild. */
+  _ensureTrackLayers() {
+    if (!this._bandsEl) {
+      this._bandsEl = document.createElement("div");
+      this._bandsEl.className = "ftc-bands";
+      this._trackEl.appendChild(this._bandsEl);
+    }
+    if (!this._motionCanvas) {
+      this._motionCanvas = document.createElement("canvas");
+      this._motionCanvas.className = "ftc-motion";
+      this._trackEl.appendChild(this._motionCanvas);
+    }
+  }
+
+  /**
+   * The motion histogram, drawn rather than built.
+   *
+   * It was hundreds of absolutely-positioned divs — one per column of the
+   * strip — rebuilt from scratch on every render. Measured against a
+   * phone-width strip, that is 1.45ms and 300-odd nodes per render per
+   * card; the same picture on a canvas is 0.28ms and one node. The
+   * difference stops mattering when the strip is idle and starts mattering
+   * a great deal while scrubbing, where a render happens every frame.
+   */
+  _drawMotion(win, span) {
+    const canvas = this._motionCanvas;
+    const cssWidth = this._trackEl.clientWidth;
+    const cssHeight = this._trackEl.clientHeight;
+    if (!canvas || !cssWidth || !cssHeight) return;
+    // Capped at 2: a 3x phone display gains nothing visible here and pays
+    // for every extra pixel.
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.round(cssWidth * ratio);
+    const height = Math.round(cssHeight * ratio);
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    if (this._config.show_motion === false || !this._recordings?.length) return;
+
+    // One column per pixel of strip, carrying the loudest score that falls
+    // in it. A day is thousands of segments against a few hundred pixels;
+    // drawn individually they would be sub-pixel slivers fighting over the
+    // same column for a picture no different from this one.
+    const buckets = Math.max(60, Math.min(600, Math.round(cssWidth)));
+    const peaks = new Float64Array(buckets);
+    let max = 0;
+    for (const m of this._recordings) {
+      if (!m.score) continue;
+      if (m.end <= win.start || m.start >= win.end) continue;
+      const from = Math.max(0, Math.floor(((m.start - win.start) / span) * buckets));
+      const to = Math.min(buckets - 1, Math.floor(((m.end - win.start) / span) * buckets));
+      for (let i = from; i <= to; i++) {
+        if (m.score > peaks[i]) peaks[i] = m.score;
+      }
+      if (m.score > max) max = m.score;
+    }
+    if (!max) return;
+
+    ctx.fillStyle =
+      getComputedStyle(this._trackEl).getPropertyValue("--frigate-timeline-motion").trim() ||
+      "rgba(255, 255, 255, 0.62)";
+    const columnWidth = width / buckets;
+    const barWidth = Math.max(ratio, columnWidth - ratio * 0.4);
+    const radius = Math.min(ratio, barWidth / 2);
+    const rounded = typeof ctx.roundRect === "function";
+    // Scaled against the loudest score *in view*, so zooming into a quiet
+    // stretch opens its detail up instead of flattening it against some
+    // unrelated peak elsewhere in the day. Square-rooted because the scores
+    // are wildly uneven — 1 to over a thousand on these cameras — and a
+    // linear scale leaves everything ordinary invisible.
+    if (rounded) ctx.beginPath();
+    for (let i = 0; i < buckets; i++) {
+      if (!peaks[i]) continue;
+      const barHeight = Math.max(
+        ratio * 2,
+        (Math.sqrt(peaks[i] / max) * MOTION_MAX_HEIGHT_PCT * height) / 100
+      );
+      const x = i * columnWidth;
+      const y = (height - barHeight) / 2;
+      if (rounded) ctx.roundRect(x, y, barWidth, barHeight, radius);
+      else ctx.fillRect(x, y, barWidth, barHeight);
+    }
+    if (rounded) ctx.fill();
+  }
+
   _renderTimeline() {
     if (!this._trackEl) return;
+    if (!this._timelineOnScreen()) {
+      // Remember that it needs one, so it isn't stale when it comes back.
+      this._renderPending = true;
+      return;
+    }
+    this._renderPending = false;
     const win = this._currentWindow();
     const span = win.end - win.start;
     if (!(span > 0)) return;
@@ -2391,7 +2548,7 @@ class FrigateTimelineCard extends HTMLElement {
     // back to front — ordinary activity, then person bands over it, then
     // the motion histogram on top, since burying the histogram under a
     // band would hide the only layer carrying detail.
-    let html = "";
+    let bandsHtml = "";
     for (const pass of ["plain", "person"]) {
       for (const seg of this._segments) {
         if ((pass === "person") !== !!seg.person) continue;
@@ -2400,42 +2557,12 @@ class FrigateTimelineCard extends HTMLElement {
         if (en <= st) continue;
         const left = ((st - win.start) / span) * 100;
         const width = Math.max(((en - st) / span) * 100, 0.15);
-        html += `<div class="ftc-band ${pass}" style="left:${left}%;width:max(2px, ${width}%);"></div>`;
+        bandsHtml += `<div class="ftc-band ${pass}" style="left:${left}%;width:max(2px, ${width}%);"></div>`;
       }
     }
-
-    if (this._config.show_motion !== false && this._recordings?.length) {
-      // One bar per pixel of track, carrying the loudest score that falls
-      // in it. A day is thousands of segments against a few hundred pixels
-      // — without bucketing they would be sub-pixel slivers fighting over
-      // the same column, thousands of DOM nodes for a picture no different
-      // from this one.
-      const buckets = Math.max(60, Math.min(600, Math.round(this._trackEl.clientWidth) || 300));
-      const peaks = new Float64Array(buckets);
-      let max = 0;
-      for (const m of this._recordings) {
-        if (!m.score) continue;
-        if (m.end <= win.start || m.start >= win.end) continue;
-        const from = Math.max(0, Math.floor(((m.start - win.start) / span) * buckets));
-        const to = Math.min(buckets - 1, Math.floor(((m.end - win.start) / span) * buckets));
-        for (let i = from; i <= to; i++) {
-          if (m.score > peaks[i]) peaks[i] = m.score;
-        }
-        if (m.score > max) max = m.score;
-      }
-      // Scaled against the loudest score *in view*, so zooming into a quiet
-      // stretch opens its detail up instead of flattening it against some
-      // unrelated peak elsewhere in the day. Square-rooted because the
-      // scores are wildly uneven — 1 to over a thousand on these cameras —
-      // and a linear scale leaves everything ordinary invisible.
-      const step = 100 / buckets;
-      for (let i = 0; i < buckets; i++) {
-        if (!peaks[i]) continue;
-        const height = Math.max(6, Math.sqrt(peaks[i] / max) * MOTION_MAX_HEIGHT_PCT);
-        html += `<div class="ftc-motion" style="left:${i * step}%;width:${step}%;height:${height}%;"></div>`;
-      }
-    }
-    this._trackEl.innerHTML = html;
+    this._ensureTrackLayers();
+    this._bandsEl.innerHTML = bandsHtml;
+    this._drawMotion(win, span);
     this._updateNowPill();
 
     let ticksHtml = "";
@@ -2472,7 +2599,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
       default_zoom_hours: 10,
       auto_hide_seconds: 0,
       live_source: "ha",
-      frigate_stream: "main",
+      frigate_stream: "auto",
       ...config,
     };
     if (!this._built) this._build();
@@ -2577,6 +2704,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
             <label class="ftc-ed-field" style="flex:1">
               <span data-i18n="edStream">Stream</span>
               <select id="ftc-ed-frigate-stream">
+                <option value="auto">auto</option>
                 <option value="main">main</option>
                 <option value="sub">sub</option>
               </select>
@@ -2763,7 +2891,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
     set("#ftc-ed-autohide", this._config.auto_hide_seconds ?? 0);
     set("#ftc-ed-live-source", this._config.live_source || "ha");
     set("#ftc-ed-go2rtc-url", this._config.go2rtc_url ?? "");
-    set("#ftc-ed-frigate-stream", this._config.frigate_stream || "main");
+    set("#ftc-ed-frigate-stream", this._config.frigate_stream || "auto");
   }
 
   _update(key, value) {

@@ -48,7 +48,7 @@ A visual editor is also available (entity picker + form fields) when adding the 
 | `auto_hide_seconds` | no | `0` | Auto-collapses the timeline after this many seconds of no interaction; `0` disables it |
 | `live_source` | no | `ha` | `ha` uses `ha-camera-stream`; `frigate` uses Frigate's own go2rtc over MSE (WebSocket-delivered fMP4 — more tolerant of tunneled paths like Tailscale than WebRTC's real-time UDP), reached through the Frigate integration's proxy so it stays same-origin with the dashboard |
 | `go2rtc_url` | no | Frigate host on port `1984` | Only used when `live_source: frigate`, and only needed for a go2rtc that isn't the one Frigate bundles. Setting it forces a direct browser→go2rtc connection instead of Home Assistant's proxy, which then has to be reachable from every device and breaks on https dashboards if it isn't TLS itself |
-| `frigate_stream` | no | `main` | Only used when `live_source: frigate`; which go2rtc stream to use, `main` (full quality) or `sub` (lighter) |
+| `frigate_stream` | no | `auto` | Only used when `live_source: frigate`. `auto` picks the sub stream unless the card is rendered wide enough to show more; `main` and `sub` force one |
 | `show_motion` | no | `true` | Draw the white motion histogram behind the activity bands |
 | `pause_offscreen` | no | `true` | Stop the live stream while the card is scrolled out of view or the app is in the background |
 
@@ -75,6 +75,10 @@ Tapping or scrubbing plays from where the selector is, with no snapping to event
 Set `show_motion: false` to drop the histogram. Colors are theme variables: `--frigate-timeline-motion`, `--frigate-timeline-detect`, `--frigate-timeline-alert`.
 
 ## Resource use
+
+Measured on a three-camera dashboard: the main streams were decoding 3200x1800, 3840x2160 and 3840x2160 at 20-25fps — **511 megapixels a second between them**, about sixty frames of 4K every second, sustained. Nearly all of it thrown away, since each card renders a few hundred pixels wide.
+
+`frigate_stream: auto` (the default) picks the sub stream unless the card is actually rendered wide enough to show more, using the sub stream's own width as the threshold. On the same dashboard that is roughly a tenth of the decode load and an eighth of the bandwidth, with nothing visibly lost at the size the cards are displayed. `main` and `sub` force the choice.
 
 Live streams stop while the card is out of sight and start again on return — scrolling past it, locking the phone or switching apps all end the decode rather than leaving it running. On a phone showing three cameras only one card fits on screen at a time, so this is the difference between decoding three streams and decoding one. Stopping is delayed a couple of seconds so a scroll straight past doesn't tear a stream down and rebuild it; starting is immediate. Set `pause_offscreen: false` to keep every card streaming regardless.
 
