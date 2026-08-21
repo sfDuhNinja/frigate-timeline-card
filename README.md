@@ -2,22 +2,26 @@
 
 A minimal Home Assistant Lovelace card: a live camera view plus a horizontal, Frigate-style event timeline underneath it — nothing else. No gallery, no thumbnail grid, no PTZ/talkback/zoom controls. Built to stay light and fast.
 
-![screenshot placeholder](https://via.placeholder.com/800x300?text=Frigate+Timeline+Card)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=sfDuhNinja&repository=frigate-timeline-card&category=dashboard)
 
 ## Features
 
-- **Live view** over WebRTC, driven directly via Home Assistant's `camera/webrtc/*` websocket commands — no added latency beyond what HA/go2rtc already provide.
-- **No native video controls anywhere.** Every `<video>` element runs with `controls=false` plus this card's own tap-to-toggle play/pause and mute button. Safari/iOS never gets to show its AVKit-styled native player chrome.
-- **Horizontal event timeline** below the live view, styled as a histogram: gold bars for detections, taller red bars for alerts, with a live red "now" pill (updating every second) and a dashed guideline.
-- **Zoom & pan** on the timeline — mouse wheel or +/− buttons on desktop, two-finger pinch on mobile/tablet; drag to pan once zoomed in.
-- **Tap/click a bar** (or anywhere on the timeline) to play the nearest recorded clip inline; a "● LIVE" button returns to the live stream.
-- Review/event/recording data is fetched over Home Assistant's own websocket via the Frigate integration (`frigate/events/get`, `frigate/reviews/get`, `frigate/recordings/get`), with Frigate's REST endpoints kept only as a fallback for setups without that integration. Direct REST is a fallback rather than the primary path because Frigate sends no CORS headers, so a browser is blocked from reading those responses cross-origin.
+- **Live view** over go2rtc's MSE stream, reached through the Frigate integration's own proxy so it stays same-origin with the dashboard — no mixed content on an https front end, and nothing that needs Frigate's address to be reachable from the device.
+- **No native video controls anywhere.** Every `<video>` runs with `controls=false` alongside the card's own play/pause and mute. The stream is also declared endless, so a fullscreen handover to Apple's player shows LIVE rather than a clock counting up.
+- **A timeline layered the way Frigate's own reads** — a white motion histogram over translucent bands, amber where something happened and red where a person was.
+- **Zoom & pan** — wheel or +/− on desktop, two-finger pinch on mobile; drag to pan once zoomed in, and dragging the selector into either end scrolls the window.
+- **Tap or scrub anywhere** to play from exactly there; playback carries on into the next stretch of footage when a clip ends. A "● LIVE" button returns to the present.
+- **Everything goes through Home Assistant** — `frigate/events/get`, `frigate/reviews/get`, `frigate/recordings/get` over its websocket, clips and live over the integration's proxy on a signed path. Frigate's own endpoints are kept only as a fallback for setups without that integration, because Frigate sends no CORS headers and a browser cannot read them cross-origin.
 
 ## Installation (HACS)
+
+Use the badge above, or add it by hand:
 
 1. HACS → the three dots (⋮) in the top right → **Custom repositories**
 2. Add `https://github.com/sfDuhNinja/frigate-timeline-card`, category **Dashboard**
 3. Install, then add the card to a dashboard (see Configuration below)
+
+The card needs the [Frigate integration](https://github.com/blakeblackshear/frigate-hass-integration) installed. It works without it, but every request then has to reach Frigate directly from the browser, which CORS blocks on most setups.
 
 ## Configuration
 

@@ -164,7 +164,6 @@ const I18N = {
     backToLive: "Revino la live",
     live: "Live",
     clipLoadError: "Nu s-a putut încărca clipul de la Frigate — verifică CORS (Access-Control-Allow-Origin) pe server.",
-    recordingLoadError: "Nu s-a putut încărca înregistrarea de la Frigate.",
     liveFrigateError: "Live direct prin Frigate a eșuat (verifică go2rtc_url, sau CORS/mixed-content dacă dashboard-ul e pe https).",
     edHost: "Server Frigate (ex: 192.168.1.11)",
     edPort: "Port",
@@ -186,7 +185,6 @@ const I18N = {
     backToLive: "Back to live",
     live: "Live",
     clipLoadError: "Couldn't load the clip from Frigate — check CORS (Access-Control-Allow-Origin) on the server.",
-    recordingLoadError: "Couldn't load the recording from Frigate.",
     liveFrigateError: "Direct Frigate live failed (check go2rtc_url, or CORS/mixed-content if the dashboard is on https).",
     edHost: "Frigate server (e.g. 192.168.1.11)",
     edPort: "Port",
@@ -1075,14 +1073,6 @@ class FrigateTimelineCard extends HTMLElement {
         /* already closed */
       }
       this._rtcWebSocket = null;
-    }
-    if (this._rtcPeerConnection) {
-      try {
-        this._rtcPeerConnection.close();
-      } catch (_) {
-        /* already closed */
-      }
-      this._rtcPeerConnection = null;
     }
   }
 
@@ -2273,43 +2263,12 @@ class FrigateTimelineCard extends HTMLElement {
     const afterSec = Math.floor(win.start / 1000);
     const beforeSec = Math.ceil(win.end / 1000);
 
-    // Same priority the companion camera-gallery-card fork uses: WS first
-    // (same-origin through HA, always reachable regardless of how the
-    // dashboard itself is being accessed — LAN http, Tailscale https,
-    // whatever), REST second as a fast-path enhancement when it happens to
-    // be reachable. Doing REST first (as this card did originally) meant
-    // events silently vanished under mixed-content blocking (dashboard
-    // served https, frigate_url is a plain http:// LAN address) with no
-    // visible error — exactly what broke playback and event display here.
-    let events = null;
-    if (this._hass?.connection) {
-      try {
-        let wsResult = await this._hass.connection.sendMessagePromise({
-          type: "frigate/events/get",
-          instance_id: this._config.frigate_instance_id,
-          after: afterSec,
-          before: beforeSec,
-          limit: 500,
-        });
-        if (typeof wsResult === "string") wsResult = JSON.parse(wsResult);
-        if (Array.isArray(wsResult)) events = wsResult;
-      } catch (err) {
-        console.warn("[frigate-timeline-card] WS frigate/events/get failed", err);
-      }
-    }
-    if (!Array.isArray(events)) {
-      try {
-        const res = await fetch(`${base}/api/events?after=${afterSec}&before=${beforeSec}&limit=500`);
-        if (res.ok) events = await res.json();
-      } catch (err) {
-        console.warn("[frigate-timeline-card] REST /api/events unavailable (CORS or mixed-content) — using WS result only", err);
-      }
-    }
-
     // Review data — the activity blocks the timeline draws its bands
-    // from. Same WS-first priority as events above:
-    // `frigate/reviews/get` goes through Home Assistant's own connection,
-    // so it is reachable however the dashboard itself is being served.
+    // from, and the first thing asked for. `frigate/reviews/get` goes
+    // through Home Assistant's own connection, so it is reachable however
+    // the dashboard itself is being served; Frigate's REST endpoint is the
+    // fallback, since Frigate sends no `Access-Control-Allow-Origin` and a
+    // browser cannot read it cross-origin.
     //
     // This used to be REST-only, on the belief that /api/review had no WS
     // equivalent. It does — the Frigate integration has shipped
@@ -2341,7 +2300,43 @@ class FrigateTimelineCard extends HTMLElement {
         const res = await fetch(`${base}/api/review?after=${afterSec}&before=${beforeSec}`);
         if (res.ok) reviews = await res.json();
       } catch (err) {
-        console.warn("[frigate-timeline-card] REST /api/review unavailable (CORS or mixed-content) — approximating from events", err);
+        console.warn("[frigate-timeline-card] REST /api/review unavailable — falling back to events", err);
+      }
+    }
+
+    // Events are only ever a fallback: the bands come from review data, and
+    // this list is used solely to approximate them when that is missing.
+    // It used to be fetched first and unconditionally — around 54 KiB per
+    // camera per day here, a Frigate query and a websocket round trip,
+    // thrown away untouched on every normal load. It also asked for every
+    // camera at once and filtered afterwards, so three cameras shared one
+    // limit of 500 and a busy day could silently drop the one being looked
+    // at. Scoped, and only asked for when there is nothing better.
+    let events = null;
+    if (!Array.isArray(reviews)) {
+      if (this._hass?.connection) {
+        try {
+          let wsResult = await this._hass.connection.sendMessagePromise({
+            type: "frigate/events/get",
+            instance_id: this._config.frigate_instance_id,
+            ...(camId ? { cameras: [camId] } : {}),
+            after: afterSec,
+            before: beforeSec,
+            limit: 500,
+          });
+          if (typeof wsResult === "string") wsResult = JSON.parse(wsResult);
+          if (Array.isArray(wsResult)) events = wsResult;
+        } catch (err) {
+          console.warn("[frigate-timeline-card] WS frigate/events/get failed", err);
+        }
+      }
+      if (!Array.isArray(events)) {
+        try {
+          const res = await fetch(`${base}/api/events?after=${afterSec}&before=${beforeSec}&limit=500`);
+          if (res.ok) events = await res.json();
+        } catch (err) {
+          console.warn("[frigate-timeline-card] REST /api/events unavailable — no fallback band data", err);
+        }
       }
     }
 
@@ -2366,9 +2361,9 @@ class FrigateTimelineCard extends HTMLElement {
           person: hasPerson(r.data?.objects),
         }));
     } else {
-      // No REST review data (CORS-blocked or Frigate unreachable directly) —
-      // fall back to the raw event list — it has no notion of a review
-      // segment, but it still knows what was seen and when.
+      // No review data at all — fall back to the raw event list. It has no
+      // notion of a review segment, but it still knows what was seen and
+      // when, which is enough to draw something honest.
       this._segments = this._events.map((ev) => {
         const startMs = Number(ev.start_time) * 1000;
         const endSec = Number(ev.end_time);
