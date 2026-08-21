@@ -166,19 +166,13 @@ const I18N = {
     clipLoadError: "Nu s-a putut încărca clipul de la Frigate — verifică CORS (Access-Control-Allow-Origin) pe server.",
     recordingLoadError: "Nu s-a putut încărca înregistrarea de la Frigate.",
     liveFrigateError: "Live direct prin Frigate a eșuat (verifică go2rtc_url, sau CORS/mixed-content dacă dashboard-ul e pe https).",
-    edCamera: "Cameră (live view, via ha-camera-stream)",
     edHost: "Server Frigate (ex: 192.168.1.11)",
     edPort: "Port",
     edFrigateCamera: "Cameră în Frigate (ex: spate)",
     edFrigateCameraSelect: "Cameră în Frigate",
-    edInstance: "Frigate instance id (implicit: frigate)",
     edHeight: "Înălțime timeline (px)",
     edZoom: "Zoom implicit (ore)",
     edAutohide: "Auto-hide timeline (secunde de inactivitate, 0 = dezactivat)",
-    edLiveSource: "Sursă live",
-    edLiveSourceHa: "Home Assistant (ha-camera-stream, implicit)",
-    edLiveSourceFrigate: "Frigate direct (go2rtc, bypass HA WebRTC)",
-    edGo2rtcUrl: "go2rtc URL (implicit: host Frigate, port 1984)",
     edStream: "Stream",
   },
   en: {
@@ -194,19 +188,13 @@ const I18N = {
     clipLoadError: "Couldn't load the clip from Frigate — check CORS (Access-Control-Allow-Origin) on the server.",
     recordingLoadError: "Couldn't load the recording from Frigate.",
     liveFrigateError: "Direct Frigate live failed (check go2rtc_url, or CORS/mixed-content if the dashboard is on https).",
-    edCamera: "Camera (live view, via ha-camera-stream)",
     edHost: "Frigate server (e.g. 192.168.1.11)",
     edPort: "Port",
     edFrigateCamera: "Camera in Frigate (e.g. spate)",
     edFrigateCameraSelect: "Camera in Frigate",
-    edInstance: "Frigate instance id (default: frigate)",
     edHeight: "Timeline strip height (px)",
     edZoom: "Default zoom (hours)",
     edAutohide: "Auto-hide timeline (seconds of inactivity, 0 = disabled)",
-    edLiveSource: "Live source",
-    edLiveSourceHa: "Home Assistant (ha-camera-stream, default)",
-    edLiveSourceFrigate: "Direct Frigate (go2rtc, bypass HA WebRTC)",
-    edGo2rtcUrl: "go2rtc URL (default: Frigate host, port 1984)",
     edStream: "Stream",
   },
 };
@@ -357,9 +345,12 @@ class FrigateTimelineCard extends HTMLElement {
     return document.createElement("frigate-timeline-card-editor");
   }
 
-  static getStubConfig(hass) {
-    const cameraEntity = Object.keys(hass?.states || {}).find((id) => id.startsWith("camera."));
-    return { camera_entity: cameraEntity || "", frigate_url: "", frigate_camera: "", height: 44 };
+  static getStubConfig() {
+    // `live_source` is set explicitly rather than left to the default: the
+    // editor no longer offers the choice, and the Home Assistant camera
+    // path it would otherwise fall into needs a `camera_entity` the editor
+    // no longer asks for either. Both remain settable in YAML.
+    return { frigate_url: "", frigate_camera: "", live_source: "frigate", height: 44 };
   }
 
   getCardSize() {
@@ -2663,7 +2654,6 @@ class FrigateTimelineCardEditor extends HTMLElement {
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
-    if (this._entityPicker) this._entityPicker.hass = hass;
     // Language (from hass.locale) is only known once hass arrives — the
     // form was built English-default in _build() (which runs before hass
     // exists), so refresh every label the first time it's available.
@@ -2686,7 +2676,6 @@ class FrigateTimelineCardEditor extends HTMLElement {
     this.querySelectorAll("[data-i18n]").forEach((el) => {
       el.textContent = this._t(el.dataset.i18n);
     });
-    if (this._entityPicker) this._entityPicker.label = this._t("edCamera");
   }
 
   /**
@@ -2707,7 +2696,6 @@ class FrigateTimelineCardEditor extends HTMLElement {
     this._built = true;
     this.innerHTML = `
       <div class="ftc-ed-form">
-        <div id="ftc-ed-entity"></div>
         <div class="ftc-ed-row">
           <label class="ftc-ed-field" style="flex:2">
             <span data-i18n="edHost">Server Frigate (ex: 192.168.1.11)</span>
@@ -2724,10 +2712,6 @@ class FrigateTimelineCardEditor extends HTMLElement {
             <input id="ftc-ed-camera" type="text" />
           </label>
         </div>
-        <label class="ftc-ed-field">
-          <span data-i18n="edInstance">Frigate instance id (implicit: frigate)</span>
-          <input id="ftc-ed-instance" type="text" />
-        </label>
         <div class="ftc-ed-row">
           <label class="ftc-ed-field" style="flex:1">
             <span data-i18n="edHeight">Înălțime timeline (px)</span>
@@ -2743,28 +2727,13 @@ class FrigateTimelineCardEditor extends HTMLElement {
           <input id="ftc-ed-autohide" type="number" min="0" step="1" />
         </label>
         <label class="ftc-ed-field">
-          <span data-i18n="edLiveSource">Sursă live</span>
-          <select id="ftc-ed-live-source">
-            <option value="ha" data-i18n="edLiveSourceHa">Home Assistant (ha-camera-stream, implicit)</option>
-            <option value="frigate" data-i18n="edLiveSourceFrigate">Frigate direct (go2rtc, bypass HA WebRTC)</option>
+          <span data-i18n="edStream">Stream</span>
+          <select id="ftc-ed-frigate-stream">
+            <option value="auto">auto</option>
+            <option value="main">main</option>
+            <option value="sub">sub</option>
           </select>
         </label>
-        <div id="ftc-ed-go2rtc-row" style="display:flex;flex-direction:column;gap:16px;">
-          <div class="ftc-ed-row">
-            <label class="ftc-ed-field" style="flex:2">
-              <span data-i18n="edGo2rtcUrl">go2rtc URL (implicit: host Frigate, port 1984)</span>
-              <input id="ftc-ed-go2rtc-url" type="text" placeholder="http://192.168.1.11:1984" />
-            </label>
-            <label class="ftc-ed-field" style="flex:1">
-              <span data-i18n="edStream">Stream</span>
-              <select id="ftc-ed-frigate-stream">
-                <option value="auto">auto</option>
-                <option value="main">main</option>
-                <option value="sub">sub</option>
-              </select>
-            </label>
-          </div>
-        </div>
       </div>
       <style>
         frigate-timeline-card-editor .ftc-ed-form { display: flex; flex-direction: column; gap: 16px; padding: 8px 2px 16px; }
@@ -2786,29 +2755,16 @@ class FrigateTimelineCardEditor extends HTMLElement {
         }
       </style>
     `;
-    const entityRow = this.querySelector("#ftc-ed-entity");
-    const picker = document.createElement("ha-entity-picker");
-    picker.includeDomains = ["camera"];
-    picker.label = this._t("edCamera");
-    picker.addEventListener("value-changed", (e) => {
-      e.stopPropagation();
-      this._update("camera_entity", e.detail.value);
-    });
-    entityRow.appendChild(picker);
-    this._entityPicker = picker;
-
     const onHostPortChange = () => {
       const host = this.querySelector("#ftc-ed-host")?.value?.trim() || "";
       const port = this.querySelector("#ftc-ed-port")?.value?.trim() || "";
       const url = host ? `http://${host}${port ? `:${port}` : ""}` : "";
       this._update("frigate_url", url);
       this._fetchFrigateCameraList();
-      this._updateGo2rtcPlaceholder();
     };
     this.querySelector("#ftc-ed-host").addEventListener("input", onHostPortChange);
     this.querySelector("#ftc-ed-port").addEventListener("input", onHostPortChange);
     this.querySelector("#ftc-ed-camera").addEventListener("input", (e) => this._update("frigate_camera", e.target.value));
-    this.querySelector("#ftc-ed-instance").addEventListener("input", (e) => this._update("frigate_instance_id", e.target.value));
     this.querySelector("#ftc-ed-height").addEventListener("input", (e) => this._update("height", Number(e.target.value) || 44));
     this.querySelector("#ftc-ed-zoom").addEventListener("input", (e) =>
       this._update("default_zoom_hours", Math.min(24, Math.max(0.25, Number(e.target.value) || 10)))
@@ -2816,8 +2772,6 @@ class FrigateTimelineCardEditor extends HTMLElement {
     this.querySelector("#ftc-ed-autohide").addEventListener("input", (e) =>
       this._update("auto_hide_seconds", Math.max(0, Number(e.target.value) || 0))
     );
-    this.querySelector("#ftc-ed-live-source").addEventListener("change", (e) => this._update("live_source", e.target.value));
-    this.querySelector("#ftc-ed-go2rtc-url").addEventListener("input", (e) => this._update("go2rtc_url", e.target.value));
     this.querySelector("#ftc-ed-frigate-stream").addEventListener("change", (e) => this._update("frigate_stream", e.target.value));
 
     this._applyI18n();
@@ -2834,48 +2788,36 @@ class FrigateTimelineCardEditor extends HTMLElement {
     }
   }
 
-  /** go2rtc_url is optional — it already defaults at runtime to the
-   * Frigate host on port 1984 (go2rtc's standard port, see the main
-   * card's `_go2rtcUrl()`). Rather than requiring the user to retype that
-   * same host here, show it live as the field's placeholder, computed
-   * from whatever's currently in the host field — so the field can stay
-   * empty (using the real default) while still showing exactly what
-   * that default is. */
-  _updateGo2rtcPlaceholder() {
-    const input = this.querySelector("#ftc-ed-go2rtc-url");
-    if (!input) return;
-    const host = this.querySelector("#ftc-ed-host")?.value?.trim() || "";
-    input.placeholder = host ? `http://${host}:1984` : "http://192.168.1.11:1984";
-  }
-
-  /** Fetches Frigate's real camera list (from /api/config) and swaps the
-   * free-text "frigate_camera" field for a dropdown once it succeeds.
-   * Silently keeps the text field as a fallback if the fetch fails
-   * (e.g. CORS). */
+  /** Discovers Frigate's camera names and swaps the free-text
+   * "frigate_camera" field for a dropdown, keeping the text field if
+   * nothing can be discovered.
+   *
+   * Home Assistant's websocket goes first. Asking Frigate directly for
+   * `/api/config` is the more authoritative source — it lists every
+   * camera, not only those with recent events — but it is cross-origin,
+   * and Frigate sends no `Access-Control-Allow-Origin`, so on most setups
+   * it fails and logs a red CORS error every time the editor opens. It is
+   * the last direct request left anywhere in the card; trying it second
+   * means the usual case never reaches it. */
   async _fetchFrigateCameraList() {
     const url = this._config?.frigate_url;
     if (!url) return;
-    const base = String(url).replace(/\/+$/, "");
     const token = (this._camFetchToken = (this._camFetchToken || 0) + 1);
+    if (await this._fetchFrigateCameraListViaWs(token)) return;
+    const base = String(url).replace(/\/+$/, "");
     try {
       const res = await fetch(`${base}/api/config`);
-      if (res.ok) {
-        const cfg = await res.json();
-        if (token !== this._camFetchToken) return;
-        const names = Object.keys(cfg?.cameras || {});
-        if (names.length) {
-          this._frigateCameraNames = names;
-          this._renderCameraField();
-          return;
-        }
-      }
+      if (!res.ok) return;
+      const cfg = await res.json();
+      if (token !== this._camFetchToken) return;
+      const names = Object.keys(cfg?.cameras || {});
+      if (!names.length) return;
+      this._frigateCameraNames = names;
+      this._renderCameraField();
     } catch (_) {
-      // CORS-blocked or unreachable — most self-hosted Frigate instances
-      // don't send Access-Control-Allow-Origin. Fall through to the WS
-      // route below instead of leaving the plain text field as the only
-      // option.
+      // Cross-origin or unreachable — the text field stays, which is a
+      // perfectly usable fallback.
     }
-    await this._fetchFrigateCameraListViaWs(token);
   }
 
   /** Fallback camera-name discovery for when direct REST to Frigate is
@@ -2888,7 +2830,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
    * up), but it's the best available discovery source when the direct
    * REST call can't be made at all. */
   async _fetchFrigateCameraListViaWs(token) {
-    if (!this._hass?.connection) return;
+    if (!this._hass?.connection) return false;
     try {
       let result = await this._hass.connection.sendMessagePromise({
         type: "frigate/events/get",
@@ -2898,14 +2840,16 @@ class FrigateTimelineCardEditor extends HTMLElement {
         limit: 500,
       });
       if (typeof result === "string") result = JSON.parse(result);
-      if (token !== this._camFetchToken) return;
-      if (!Array.isArray(result)) return;
+      if (token !== this._camFetchToken) return true; // superseded; don't also run REST
+      if (!Array.isArray(result)) return false;
       const names = [...new Set(result.map((ev) => ev.camera).filter(Boolean))].sort();
-      if (!names.length) return;
+      if (!names.length) return false;
       this._frigateCameraNames = names;
       this._renderCameraField();
+      return true;
     } catch (err) {
       console.warn("[frigate-timeline-card] WS camera discovery failed", err);
+      return false;
     }
   }
 
@@ -2926,10 +2870,6 @@ class FrigateTimelineCardEditor extends HTMLElement {
   }
 
   _sync() {
-    if (this._entityPicker) {
-      this._entityPicker.value = this._config.camera_entity || "";
-      if (this._hass) this._entityPicker.hass = this._hass;
-    }
     const set = (id, val) => {
       const el = this.querySelector(id);
       if (el && el.value !== String(val ?? "")) el.value = val ?? "";
@@ -2937,14 +2877,10 @@ class FrigateTimelineCardEditor extends HTMLElement {
     const { host, port } = this._parseFrigateUrl(this._config.frigate_url);
     set("#ftc-ed-host", host);
     set("#ftc-ed-port", port);
-    this._updateGo2rtcPlaceholder();
     if (!this._frigateCameraNames?.length) set("#ftc-ed-camera", this._config.frigate_camera);
-    set("#ftc-ed-instance", this._config.frigate_instance_id);
     set("#ftc-ed-height", this._config.height ?? 44);
     set("#ftc-ed-zoom", this._config.default_zoom_hours ?? 10);
     set("#ftc-ed-autohide", this._config.auto_hide_seconds ?? 0);
-    set("#ftc-ed-live-source", this._config.live_source || "ha");
-    set("#ftc-ed-go2rtc-url", this._config.go2rtc_url ?? "");
     set("#ftc-ed-frigate-stream", this._config.frigate_stream || "auto");
   }
 
