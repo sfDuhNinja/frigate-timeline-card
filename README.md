@@ -23,19 +23,18 @@ A minimal Home Assistant Lovelace card: a live camera view plus a horizontal, Fr
 
 ```yaml
 type: custom:frigate-timeline-card
-camera_entity: camera.camera_spate      # required unless live_source: frigate — HA camera entity for the live view
-frigate_url: http://192.168.1.11:5000   # required — Frigate REST base, reachable from the browser
+frigate_url: http://192.168.1.11:5000   # required — Frigate's own address
 frigate_camera: spate                   # required — Frigate's own camera name (not the HA entity)
-frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id (default: "frigate")
+live_source: frigate                    # go2rtc MSE through HA's Frigate proxy
 height: 44                              # optional — timeline strip height in px
 default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default: 10)
 auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default: 0, disabled)
-live_source: ha                         # optional — "ha" (default) or "frigate" (go2rtc MSE via HA's Frigate proxy)
-go2rtc_url: http://192.168.1.11:1984    # optional — only used when live_source: frigate; defaults to the frigate_url host on port 1984
-frigate_stream: main                    # optional — only used when live_source: frigate; go2rtc stream suffix, "main" or "sub"
+frigate_stream: auto                    # optional — "auto" (default), "main" or "sub"
+show_motion: true                       # optional — draw the motion histogram (default: true)
+pause_offscreen: true                   # optional — stop streaming while off screen (default: true)
 ```
 
-A visual editor is also available (entity picker + form fields) when adding the card through the dashboard UI — every option above is reachable there, no YAML editing required.
+The visual editor covers what people actually change: Frigate host and port, the camera, timeline height, default zoom, auto-hide, and the stream choice. `camera_entity`, `frigate_instance_id`, `live_source` and `go2rtc_url` are YAML-only — they exist for setups that need them and would be clutter for everyone else.
 
 | Option | Required | Default | Description |
 |---|---|---|---|
@@ -51,14 +50,6 @@ A visual editor is also available (entity picker + form fields) when adding the 
 | `frigate_stream` | no | `auto` | Only used when `live_source: frigate`. `auto` picks the sub stream unless the card is rendered wide enough to show more; `main` and `sub` force one |
 | `show_motion` | no | `true` | Draw the white motion histogram behind the activity bands |
 | `pause_offscreen` | no | `true` | Stop the live stream while the card is scrolled out of view or the app is in the background |
-
-## Why this exists
-
-Most Frigate/camera Lovelace cards bundle a full media gallery, thumbnails, PTZ, and more — genuinely useful, but heavy when all you want is "show me the camera live, and let me scrub through today's events." This card intentionally does one thing.
-
-## License
-
-MIT
 
 ## Timeline
 
@@ -83,3 +74,11 @@ Measured on a three-camera dashboard: the main streams were decoding 3200x1800, 
 Live streams stop while the card is out of sight and start again on return — scrolling past it, locking the phone or switching apps all end the decode rather than leaving it running. On a phone showing three cameras only one card fits on screen at a time, so this is the difference between decoding three streams and decoding one. Stopping is delayed a couple of seconds so a scroll straight past doesn't tear a stream down and rebuild it; starting is immediate. Set `pause_offscreen: false` to keep every card streaming regardless.
 
 If a camera drops intermittently, check what it is actually streaming: `frigate_stream: sub` is often the difference between a 4K HEVC stream and a 720p H.264 one, and three simultaneous 4K decodes is where hardware decoders start failing.
+
+## Why this exists
+
+Most Frigate/camera Lovelace cards bundle a full media gallery, thumbnails, PTZ, and more — genuinely useful, but heavy when all you want is "show me the camera live, and let me scrub through today's events." This card intentionally does one thing.
+
+## License
+
+MIT
