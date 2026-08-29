@@ -9,7 +9,8 @@
  * Minimal Home Assistant Lovelace card: live camera view plus a horizontal
  * Frigate-style event timeline below it. The strip is layered the way
  * Frigate's own timeline reads: translucent bands mark where activity
- * happened — red where a person was, amber otherwise — and a white
+ * happened — red for an alert, amber for a detection, Frigate's own two
+ * severities — and a white
  * histogram over them shows how much motion, drawn from the per-segment
  * motion scores. A live-updating "now" pill tracks the present. Click/drag
  * the timeline to play the nearest ~1min of recorded footage inline; a
@@ -73,6 +74,7 @@
  *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id, for the events WS call (default "frigate")
  *   height: 44                              # optional — timeline strip height in px
  *   show_motion: true                       # optional — draw the white motion histogram behind the activity bands (default true)
+ *   show_glow: true                         # optional — glow the picture's edges amber/red while there is activity (default true)
  *   pause_offscreen: true                   # optional — stop the live stream while the card is scrolled out of view or the app is in the background (default true)
  *   default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default 10)
  *   auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default 0 = disabled)
@@ -115,6 +117,17 @@ const MSE_CODECS_VIDEO_ONLY = "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153
 /** Screen width, in CSS pixels, above which a device with a mouse counts as
  * a desktop and gets the full stream regardless of how small the card is. */
 const DESKTOP_MIN_SCREEN_CSS_PX = 1024;
+/** How often recent activity is re-read while a card is live and on
+ * screen — the only polling the card does, and what keeps both the glow
+ * and the strip's newest bands current. */
+const ACTIVITY_POLL_MS = 5000;
+/** How far back each refresh looks. Wide enough to pick up anything missed
+ * across a suspend/resume, narrow enough to stay a few kilobytes. */
+const ACTIVITY_WINDOW_SEC = 300;
+/** How long after a segment ends the glow stays lit. Frigate gives a brief
+ * detection an end_time equal to its start_time, so without this the glow
+ * would be a single frame long. */
+const GLOW_ACTIVE_GRACE_MS = 8000;
 /** How long a card stays streaming after it leaves the screen, so a scroll
  * straight past doesn't tear the stream down and rebuild it. */
 const OFFSCREEN_GRACE_MS = 2500;
@@ -123,13 +136,6 @@ const OFFSCREEN_GRACE_MS = 2500;
  * level: a fixed number of minutes is a different amount of screen at
  * every zoom, which is what left the pill overflowing at a day's width. */
 const NOW_RIGHT_MARGIN_PX = 48;
-/** Frigate labels a person "person" and, once the second pass confirms it,
- * "person-verified". Both count, and the check is a substring rather than
- * an equality so a future qualifier doesn't silently stop matching. */
-function hasPerson(labels) {
-  return (labels || []).some((l) => String(l || "").toLowerCase().includes("person"));
-}
-
 // Minimal inline icon set (Material Design icon paths) — no emoji anywhere
 // in the control bar, per design requirement. `currentColor` fill means
 // each button's own text color (and CSS var overrides) apply automatically.
@@ -283,7 +289,7 @@ class FrigateTimelineCard extends HTMLElement {
     if (config.live_source !== "frigate" && !config.camera_entity) {
       throw new Error("frigate-timeline-card: 'camera_entity' is required (for live view via ha-camera-stream)");
     }
-    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "auto", show_motion: true, pause_offscreen: true, ...config };
+    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "auto", show_motion: true, pause_offscreen: true, show_glow: true, ...config };
     this._dayKey = todayKey();
     this._segments = [];
     this._events = [];
@@ -420,6 +426,7 @@ class FrigateTimelineCard extends HTMLElement {
     // Bumped before the teardown so the in-flight attempt's onclose reads
     // it as superseded rather than as a drop worth reconnecting.
     this._liveToken = (this._liveToken || 0) + 1;
+    this._stopActivityPolling();
     this._teardownWebRtc();
     this._teardownHls();
   }
@@ -455,11 +462,14 @@ class FrigateTimelineCard extends HTMLElement {
     }
     if (shouldStream) {
       this._resumeLive();
+      this._startActivityPolling();
       return;
     }
+    this._stopActivityPolling();
     this._suspendTimer = setTimeout(() => {
       this._suspendTimer = null;
       this._suspendLive();
+      this._updateGlow();
     }, OFFSCREEN_GRACE_MS);
   }
 
@@ -542,6 +552,22 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-stage {
           position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000;
         }
+        /* Sits over the picture rather than around it, so the colour reads
+           as coming off the edges of the camera view itself — and so it
+           works the same whether the stage holds a live stream or a clip. */
+        frigate-timeline-card .ftc-glow {
+          position: absolute; inset: 0; pointer-events: none; z-index: 2;
+          opacity: 0; transition: opacity 400ms ease, box-shadow 400ms ease;
+          border-radius: inherit;
+        }
+        frigate-timeline-card .ftc-glow.detect {
+          opacity: 1;
+          box-shadow: inset 0 0 22px 3px var(--frigate-timeline-detect, rgba(242, 182, 50, 0.34));
+        }
+        frigate-timeline-card .ftc-glow.alert {
+          opacity: 1;
+          box-shadow: inset 0 0 26px 5px var(--frigate-timeline-alert, rgba(239, 68, 68, 0.55));
+        }
         frigate-timeline-card .ftc-stage ha-camera-stream,
         frigate-timeline-card .ftc-stage video {
           width: 100%; height: 100%; display: block; object-fit: contain; background: #000;
@@ -604,7 +630,7 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-band.plain {
           background: var(--frigate-timeline-detect, rgba(242, 182, 50, 0.34));
         }
-        frigate-timeline-card .ftc-band.person {
+        frigate-timeline-card .ftc-band.alert {
           background: var(--frigate-timeline-alert, rgba(239, 68, 68, 0.55));
         }
         frigate-timeline-card .ftc-bands { position: absolute; inset: 0; }
@@ -1453,6 +1479,8 @@ class FrigateTimelineCard extends HTMLElement {
       this._streamEl = null;
     }
 
+    this._updateGlow();
+
     if (this._config.live_source === "frigate") {
       await this._showLiveViaGo2rtc(token);
     } else {
@@ -2084,6 +2112,7 @@ class FrigateTimelineCard extends HTMLElement {
     video.addEventListener("timeupdate", () => {
       this._clipCurrentMs = (this._clipStartSec + video.currentTime) * 1000;
       this._updateNowPill();
+      this._updateGlow();
     });
     video.addEventListener("ended", () => {
       if (this._playingClip !== clip) return;
@@ -2363,15 +2392,9 @@ class FrigateTimelineCard extends HTMLElement {
         .map((r) => ({
           start: Number(r.start_time) * 1000,
           end: Number.isFinite(Number(r.end_time)) ? Number(r.end_time) * 1000 : Date.now(),
-          // Red means a person was there, which is not the same thing as
-          // Frigate's own `alert` severity and is the more useful of the
-          // two to be able to spot. Measured against a day of this setup's
-          // data: 97 review segments contained a person but only 68 were
-          // alerts, so a severity-driven red would have missed 29 of them
-          // outright — while 34 alerts were cats, which would have been
-          // red for no reason. Severity still decides nothing else here;
-          // everything without a person reads as ordinary activity.
-          person: hasPerson(r.data?.objects),
+          // Frigate's own severity, so the strip agrees with what Frigate
+          // itself shows: red for an alert, amber for a detection.
+          alert: r.severity === "alert",
         }));
     } else {
       // No review data at all — fall back to the raw event list. It has no
@@ -2381,7 +2404,9 @@ class FrigateTimelineCard extends HTMLElement {
         const startMs = Number(ev.start_time) * 1000;
         const endSec = Number(ev.end_time);
         const endMs = Number.isFinite(endSec) ? endSec * 1000 : startMs + 10000;
-        return { start: startMs, end: endMs, person: hasPerson([ev.label, ev.sub_label]) };
+        // Events carry the same severity Frigate assigned, one level down
+        // in `data` — the only place to get it when review data is missing.
+        return { start: startMs, end: endMs, alert: ev.data?.max_severity === "alert" };
       });
     }
     this._renderTimeline();
@@ -2450,6 +2475,78 @@ class FrigateTimelineCard extends HTMLElement {
     this._renderTimeline();
   }
 
+  /**
+   * Re-reads the last few minutes of review data while the card is live and
+   * on screen. The only polling the card does, and it earns its keep twice:
+   * it drives the glow, and it is what makes the strip show activity that
+   * happened after the page was opened — `_ensureData` is keyed by day, so
+   * without this the timeline sat frozen at whatever existed on load until
+   * the day changed.
+   *
+   * Scoped to one camera over a five-minute window, so a response is a
+   * handful of segments and a couple of kilobytes. It starts and stops with
+   * the stream: off screen or in the background there is nothing to glow
+   * and nobody reading the strip.
+   */
+  async _pollRecentActivity() {
+    if (!this._hass?.connection || this._dayKey !== todayKey()) return;
+    const camId = this._cameraObjectId();
+    const nowSec = Math.floor(Date.now() / 1000);
+    let reviews;
+    try {
+      reviews = await this._hass.connection.sendMessagePromise({
+        type: "frigate/reviews/get",
+        instance_id: this._config.frigate_instance_id,
+        ...(camId ? { cameras: [camId] } : {}),
+        after: nowSec - ACTIVITY_WINDOW_SEC,
+        before: nowSec + 5,
+        limit: 50,
+      });
+      if (typeof reviews === "string") reviews = JSON.parse(reviews);
+    } catch (err) {
+      console.warn("[frigate-timeline-card] activity refresh failed", err);
+      return;
+    }
+    if (!Array.isArray(reviews)) return;
+
+    const byId = new Map((this._segments || []).map((seg) => [seg.id, seg]));
+    let changed = false;
+    for (const r of reviews) {
+      if (r.camera !== camId || !Number.isFinite(Number(r.start_time))) continue;
+      const seg = {
+        id: r.id,
+        start: Number(r.start_time) * 1000,
+        end: Number.isFinite(Number(r.end_time)) ? Number(r.end_time) * 1000 : Date.now(),
+        alert: r.severity === "alert",
+      };
+      const existing = byId.get(seg.id);
+      // A segment still in progress comes back under the same id with a
+      // later end each time, so replacing matters as much as adding — and
+      // its severity can be promoted to alert partway through.
+      if (!existing || existing.end !== seg.end || existing.alert !== seg.alert) {
+        byId.set(seg.id, seg);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this._segments = [...byId.values()].sort((a, b) => a.start - b.start);
+      this._renderTimeline();
+    }
+    this._updateGlow();
+  }
+
+  _startActivityPolling() {
+    if (this._activityTimer) return;
+    this._pollRecentActivity();
+    this._activityTimer = setInterval(() => this._pollRecentActivity(), ACTIVITY_POLL_MS);
+  }
+
+  _stopActivityPolling() {
+    if (!this._activityTimer) return;
+    clearInterval(this._activityTimer);
+    this._activityTimer = null;
+  }
+
   /** Formats a Date as "20:56:54" — 24h, used for the now-pill. */
   _formatClock(d) {
     return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
@@ -2490,6 +2587,62 @@ class FrigateTimelineCard extends HTMLElement {
    * the strip is collapsed most of the time. */
   _timelineOnScreen() {
     return !document.hidden && this._onScreen !== false && !this._timelineHidden;
+  }
+
+  /**
+   * The glow around the picture, in the two colours the timeline already
+   * uses: amber for a detection, red for an alert.
+   *
+   * Both cases read the same review segments the timeline is drawn from,
+   * so the colours can never disagree with the strip. On a clip the lookup
+   * is against where playback has reached, so the glow replays with the
+   * footage rather than reporting the present; on live it is against the
+   * last few seconds of wall clock.
+   */
+  _updateGlow() {
+    if (!this._stageEl) return;
+    const state = this._config?.show_glow === false ? null : this._glowState();
+    // `isConnected` is the load-bearing half of this check: _showLive()
+    // empties the stage, so the element can be gone while `_glowShown`
+    // still says what it used to show — without this the overlay would
+    // simply never come back after a live restart.
+    const alive = this._glowEl?.isConnected;
+    if (alive && state === this._glowShown) return; // don't touch the DOM 3x a second
+    this._glowShown = state;
+    if (!alive) {
+      this._glowEl = document.createElement("div");
+      this._glowEl.className = "ftc-glow";
+      this._stageEl.appendChild(this._glowEl);
+    }
+    this._glowEl.className = `ftc-glow${state ? ` ${state}` : ""}`;
+  }
+
+  /** "alert" | "detect" | null */
+  _glowState() {
+    if (this._playingClip) {
+      const at = this._clipCurrentMs;
+      if (!Number.isFinite(at)) return null;
+      let found = null;
+      for (const seg of this._segments || []) {
+        if (at < seg.start || at > seg.end) continue;
+        if (seg.alert) return "alert";
+        found = "detect";
+      }
+      return found;
+    }
+    // Live: whatever the refresh below last saw ending within the past few
+    // seconds. Frigate gives a brief detection an `end_time` equal to its
+    // `start_time` rather than leaving it open, so "in progress" cannot be
+    // read off the record itself — recency is the only honest test, and it
+    // doubles as the glow's fade-out.
+    const now = Date.now();
+    let found = null;
+    for (const seg of this._segments || []) {
+      if (seg.end < now - GLOW_ACTIVE_GRACE_MS || seg.start > now + 5000) continue;
+      if (seg.alert) return "alert";
+      found = "detect";
+    }
+    return found;
   }
 
   /** Bands are a handful of elements and stay as DOM; motion is hundreds of
@@ -2598,13 +2751,13 @@ class FrigateTimelineCard extends HTMLElement {
     // Laid out the way Frigate's own timeline reads: review segments are
     // translucent full-height bands marking *where* something happened,
     // and motion is a histogram of *how much*, drawn over them. Painted
-    // back to front — ordinary activity, then person bands over it, then
+    // back to front — detections, then alert bands over them, then
     // the motion histogram on top, since burying the histogram under a
     // band would hide the only layer carrying detail.
     let bandsHtml = "";
-    for (const pass of ["plain", "person"]) {
+    for (const pass of ["plain", "alert"]) {
       for (const seg of this._segments) {
-        if ((pass === "person") !== !!seg.person) continue;
+        if ((pass === "alert") !== !!seg.alert) continue;
         const st = Math.max(seg.start, win.start);
         const en = Math.min(seg.end, win.end);
         if (en <= st) continue;

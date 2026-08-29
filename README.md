@@ -8,7 +8,7 @@ A minimal Home Assistant Lovelace card: a live camera view plus a horizontal, Fr
 
 - **Live view** over go2rtc's MSE stream, reached through the Frigate integration's own proxy so it stays same-origin with the dashboard — no mixed content on an https front end, and nothing that needs Frigate's address to be reachable from the device.
 - **No native video controls anywhere.** Every `<video>` runs with `controls=false` alongside the card's own play/pause and mute. The stream is also declared endless, so a fullscreen handover to Apple's player shows LIVE rather than a clock counting up.
-- **A timeline layered the way Frigate's own reads** — a white motion histogram over translucent bands, amber where something happened and red where a person was.
+- **A timeline layered the way Frigate's own reads** — a white motion histogram over translucent bands, amber for a detection and red for an alert. The picture's edges glow the same two colours while something is happening, live or in a replayed clip.
 - **Zoom & pan** — wheel or +/− on desktop, two-finger pinch on mobile; drag to pan once zoomed in, and dragging the selector into either end scrolls the window.
 - **Tap or scrub anywhere** to play from exactly there; playback carries on into the next stretch of footage when a clip ends. A "● LIVE" button returns to the present.
 - **Everything goes through Home Assistant** — `frigate/events/get`, `frigate/reviews/get`, `frigate/recordings/get` over its websocket, clips and live over the integration's proxy on a signed path. Frigate's own endpoints are kept only as a fallback for setups without that integration, because Frigate sends no CORS headers and a browser cannot read them cross-origin.
@@ -35,6 +35,7 @@ default_zoom_hours: 10                  # optional — initial timeline zoom win
 auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default: 0, disabled)
 frigate_stream: auto                    # optional — "auto" (default), "main" or "sub"
 show_motion: true                       # optional — draw the motion histogram (default: true)
+show_glow: true                         # optional — glow the picture's edges on activity (default: true)
 pause_offscreen: true                   # optional — stop streaming while off screen (default: true)
 ```
 
@@ -53,6 +54,7 @@ The visual editor covers what people actually change: Frigate host and port, the
 | `go2rtc_url` | no | Frigate host on port `1984` | Only used when `live_source: frigate`, and only needed for a go2rtc that isn't the one Frigate bundles. Setting it forces a direct browser→go2rtc connection instead of Home Assistant's proxy, which then has to be reachable from every device and breaks on https dashboards if it isn't TLS itself |
 | `frigate_stream` | no | `auto` | Only used when `live_source: frigate`. `auto` uses the full stream on a desktop and the sub stream everywhere else; `main` and `sub` force one |
 | `show_motion` | no | `true` | Draw the white motion histogram behind the activity bands |
+| `show_glow` | no | `true` | Glow the picture's edges amber for a detection and red for an alert, on live and during clip playback |
 | `pause_offscreen` | no | `true` | Stop the live stream while the card is scrolled out of view or the app is in the background |
 
 ## Timeline
@@ -61,9 +63,13 @@ The strip is layered the way Frigate's own timeline reads:
 
 - **White histogram** — motion, from each recording segment's `motion` score. Bar height is the loudest score in that column, square-rooted and scaled against the loudest score *in the visible window*, so zooming into a quiet stretch opens up its detail instead of flattening it against an unrelated peak elsewhere in the day.
 - **Amber band** — a review segment: Frigate decided something happened here.
-- **Red band** — the same, but a person was in it.
+- **Red band** — the same, but Frigate called it an alert.
 
-Red tracks people rather than Frigate's `alert` severity, because the two are not the same thing. Over a measured day on a three-camera setup, 97 review segments contained a person but only 68 were alerts — a severity-driven red would have missed 29 of them — while 34 alerts were cats.
+The two colours are Frigate's own severities, so the strip never disagrees with what Frigate itself shows.
+
+The edges of the picture glow in those same two colours while there is activity, and stay lit for a few seconds after it ends — Frigate gives a brief detection an `end_time` equal to its `start_time`, so without that grace the glow would last a single frame. During a clip the glow follows playback rather than the present, so it replays with the footage. `show_glow: false` turns it off.
+
+While a card is live and on screen it re-reads the last five minutes of review data every five seconds — the only polling the card does. That keeps the glow current and is also what lets the strip show activity that happened after the page was opened.
 
 Tapping or scrubbing plays from where the selector is, with no snapping to events. The one adjustment is a tap into a gap: Frigate keeps footage only where something happened — around half a day on these cameras — so those land on the nearest recorded edge rather than failing to load. When a clip reaches its end, playback carries on into the next stretch of footage, jumping the gaps, until it catches up with live.
 
