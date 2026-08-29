@@ -73,7 +73,7 @@
  *   auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default 0 = disabled)
  *   live_source: ha                         # optional — "ha" (default, via ha-camera-stream) or "frigate" (go2rtc MSE through HA's Frigate proxy, bypassing HA's WebRTC bridge)
  *   go2rtc_url: http://192.168.1.11:1984    # optional — only used when live_source: frigate; forces a direct connection to a go2rtc that isn't the one Frigate bundles (skips HA's proxy, so mixed-content/reachability caveats come back)
- *   frigate_stream: auto                    # optional — only used when live_source: frigate; "auto" (default — sub stream unless the card is rendered wide enough to show more), "main" or "sub"
+ *   frigate_stream: auto                    # optional — only used when live_source: frigate; "auto" (default — full stream on a desktop, sub stream on phones and tablets), "main" or "sub"
  */
 
 const PLAYHEAD_TICK_MS = 60 * 1000;
@@ -107,10 +107,9 @@ const CLIP_WINDOW_SEC = 60;
 const MSE_CODECS_WITH_AUDIO =
   "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0,mp4a.40.2,mp4a.40.5,opus,flac";
 const MSE_CODECS_VIDEO_ONLY = "avc1.640029,avc1.64002A,avc1.640033,hvc1.1.6.L153.B0";
-/** Rendered width, in device pixels, at which `frigate_stream: auto`
- * switches from the sub stream to the main one — the sub stream's own
- * width, below which main resolves detail the element cannot show. */
-const AUTO_MAIN_MIN_DEVICE_PX = 1280;
+/** Screen width, in CSS pixels, above which a device with a mouse counts as
+ * a desktop and gets the full stream regardless of how small the card is. */
+const DESKTOP_MIN_SCREEN_CSS_PX = 1024;
 /** How long a card stays streaming after it leaves the screen, so a scroll
  * straight past doesn't tear the stream down and rebuild it. */
 const OFFSCREEN_GRACE_MS = 2500;
@@ -381,18 +380,6 @@ class FrigateTimelineCard extends HTMLElement {
     // isn't known at the first connect — the card may not be laid out yet,
     // and it changes again on fullscreen or a window resize. Re-check when
     // it moves, and only reconnect when the answer actually differs.
-    if (this._config?.frigate_stream === "auto" && "ResizeObserver" in window) {
-      this._sizeObserver = new ResizeObserver(() => {
-        clearTimeout(this._sizeTimer);
-        this._sizeTimer = setTimeout(() => {
-          if (this._config?.live_source !== "frigate") return;
-          if (this._playingClip || this._liveSuspended || !this._activeStreamSuffix) return;
-          if (this._resolveStreamSuffix() === this._activeStreamSuffix) return;
-          this._showLive();
-        }, 600);
-      });
-      this._sizeObserver.observe(this);
-    }
     // Drag tracking has to live on `window`, not the track: a pointer that
     // leaves the element mid-drag still has to be followed. Bound here
     // rather than in _build() so it can be unbound on disconnect — _build()
@@ -418,9 +405,6 @@ class FrigateTimelineCard extends HTMLElement {
     document.removeEventListener("visibilitychange", this._onVisibilityChange);
     this._viewObserver?.disconnect();
     this._viewObserver = null;
-    this._sizeObserver?.disconnect();
-    this._sizeObserver = null;
-    clearTimeout(this._sizeTimer);
     if (this._suspendTimer) {
       clearTimeout(this._suspendTimer);
       this._suspendTimer = null;
@@ -1312,14 +1296,33 @@ class FrigateTimelineCard extends HTMLElement {
   _resolveStreamSuffix() {
     const configured = this._config.frigate_stream || "auto";
     if (configured !== "auto") return configured;
-    const cssWidth = this._streamEl?.clientWidth || this._stageEl?.clientWidth || this.clientWidth || 0;
-    const devicePixels = cssWidth * Math.min(window.devicePixelRatio || 1, 3);
-    return devicePixels >= AUTO_MAIN_MIN_DEVICE_PX ? "main" : "sub";
+    // Decided by what the device is, not by how big the card happens to be
+    // drawn. A machine with a mouse and a monitor has the headroom for the
+    // full stream, and getting it everywhere means fullscreen is already at
+    // full quality the moment it opens — no reconnect, no wait, and none of
+    // the machinery that would take to arrange. Everything else stays on
+    // the sub stream, which is the case this was ever protecting: on the
+    // dashboard it was measured against, that is 54 Mpx/s against 510.
+    //
+    // The trade is a tablet in fullscreen, which stays at 720p rather than
+    // reconnecting for more. `frigate_stream: main` covers that if it
+    // matters more than the battery does.
+    return this._isDesktopClass() ? "main" : "sub";
   }
+
+  /** A mouse and a screen this wide means a computer, not a phone held in
+   * one hand or a tablet on a sofa. Both halves are needed: a touchscreen
+   * laptop still has a fine pointer available, and a tablet in landscape is
+   * wide enough on its own. */
+  _isDesktopClass() {
+    const finePointer = window.matchMedia?.("(pointer: fine)")?.matches ?? false;
+    return finePointer && (window.screen?.width || 0) >= DESKTOP_MIN_SCREEN_CSS_PX;
+  }
+
+
 
   _go2rtcStreamName() {
     const suffix = this._resolveStreamSuffix();
-    this._activeStreamSuffix = suffix;
     return `${this._config.frigate_camera}_${suffix}`;
   }
 
@@ -1410,7 +1413,7 @@ class FrigateTimelineCard extends HTMLElement {
    *     plain http/LAN-only, where it avoids HA's WebRTC bridge as an
    *     extra hop/point of failure.
    */
-  async _showLive({ resetView = false } = {}) {
+  async _showLive({ resetView = false, keepElement = false } = {}) {
     // _build() calls _showLive() once at the end, unconditionally — before
     // `hass` has ever been set (setConfig()/_build() run synchronously,
     // hass arrives from the platform afterward). The ha-camera-stream path
@@ -1440,8 +1443,10 @@ class FrigateTimelineCard extends HTMLElement {
     const token = (this._liveToken = (this._liveToken || 0) + 1);
     this._teardownWebRtc();
     this._teardownHls();
-    this._stageEl.innerHTML = "";
-    this._streamEl = null;
+    if (!keepElement) {
+      this._stageEl.innerHTML = "";
+      this._streamEl = null;
+    }
 
     if (this._config.live_source === "frigate") {
       await this._showLiveViaGo2rtc(token);
@@ -1504,14 +1509,22 @@ class FrigateTimelineCard extends HTMLElement {
    * subsequent binary WS message is one fMP4 segment to append.
    */
   async _showLiveViaGo2rtc(token) {
-    const video = document.createElement("video");
+    // Reuses the element when one is already on the stage. Switching
+    // streams is a reconnect, and a reconnect that built a new <video>
+    // would drop straight out of fullscreen — removing the fullscreen
+    // element from the document is exactly how fullscreen ends. Same
+    // element, new MediaSource: the picture changes, the window doesn't.
+    const reused = this._streamEl?.tagName === "VIDEO" && this._streamEl.isConnected;
+    const video = reused ? this._streamEl : document.createElement("video");
     video.autoplay = true;
     video.muted = true;
     video.playsInline = true;
     video.controls = false;
-    this._stageEl.appendChild(video);
-    this._streamEl = video;
-    this._bindVideoControls(video);
+    if (!reused) {
+      this._stageEl.appendChild(video);
+      this._streamEl = video;
+      this._bindVideoControls(video);
+    }
     // Play/pause stays hidden on live regardless of source — consistent
     // with the ha-camera-stream path, even though a real <video> here
     // technically could pause the live feed.
