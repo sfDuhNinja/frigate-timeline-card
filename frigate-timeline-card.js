@@ -945,12 +945,8 @@ class FrigateTimelineCard extends HTMLElement {
       video.preload = "auto";
       video.src = base + seg.src;
       video.addEventListener("error", () => this._teardownScrubPreview());
-      video.addEventListener("seeked", () => {
-        if (this._previewEl !== video || this._previewWantSec == null) return;
-        const want = this._previewWantSec;
-        this._previewWantSec = null;
-        this._seekPreview(video, want);
-      });
+      video.addEventListener("seeked", () => this._applyPendingSeek(video));
+      video.addEventListener("loadedmetadata", () => this._applyPendingSeek(video));
       this._zoomEl.appendChild(video);
       this._previewEl = video;
       this._previewSrc = seg.src;
@@ -1021,7 +1017,28 @@ class FrigateTimelineCard extends HTMLElement {
       this._previewWantSec = seconds;
       return;
     }
+    // Clearing it here is load-bearing. A position that actually lands makes
+    // any older one still queued behind it obsolete, and leaving it there
+    // meant the next `seeked` dragged the picture back to wherever the
+    // finger had been when the segment loaded — which read as the preview
+    // freezing an hour into a drag.
+    this._previewWantSec = null;
     video.currentTime = seconds;
+  }
+
+  /** Applies a position that arrived before the file could accept one.
+   *
+   * Both events matter and for different reasons. `seeked` covers a seek
+   * requested while another was still running. `loadedmetadata` covers the
+   * first position of every segment, which is deferred because readyState is
+   * 0 the instant the element is created — and without it nothing ever
+   * re-triggers, since `seeked` cannot fire for a seek that never started.
+   * That is why the picture sat at the start of each new hour. */
+  _applyPendingSeek(video) {
+    if (this._previewEl !== video || this._previewWantSec == null) return;
+    const want = this._previewWantSec;
+    this._previewWantSec = null;
+    this._seekPreview(video, want);
   }
 
   _teardownScrubPreview() {
