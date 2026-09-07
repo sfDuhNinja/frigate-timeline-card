@@ -935,23 +935,34 @@ class FrigateTimelineCard extends HTMLElement {
       return;
     }
 
-    if (!this._previewEl || this._previewSrc !== seg.src) {
-      this._teardownScrubPreview();
+    // Built once per drag and kept, however many hours the finger crosses.
+    // Creating one per segment is what put this card back where it was
+    // before v1.31.1: iOS hands media decoders back slowly, so a long drag
+    // drained the pool, blacked out the other cameras, and left later
+    // segments unable to load at all — which is why the filmstrip died
+    // somewhere past the first hour.
+    if (!this._previewVideoEl) {
       const video = document.createElement("video");
       video.className = "ftc-preview";
       video.muted = true;
       video.playsInline = true;
       video.controls = false;
       video.preload = "auto";
-      video.src = base + seg.src;
-      video.addEventListener("error", () => this._teardownScrubPreview());
       video.addEventListener("seeked", () => this._applyPendingSeek(video));
       video.addEventListener("loadedmetadata", () => this._applyPendingSeek(video));
       this._zoomEl.appendChild(video);
-      this._previewEl = video;
-      this._previewSrc = seg.src;
+      this._previewVideoEl = video;
     }
-    this._seekPreview(this._previewEl, Math.max(0, tsMs / 1000 - seg.start));
+    if (this._previewSrc !== seg.src) {
+      this._previewSrc = seg.src;
+      // A position queued against the previous hour means nothing in this
+      // one; leaving it would seek the new file to the old offset.
+      this._previewWantSec = null;
+      this._previewVideoEl.src = base + seg.src;
+    }
+    if (this._previewImgEl) this._previewImgEl.hidden = true;
+    this._previewVideoEl.hidden = false;
+    this._seekPreview(this._previewVideoEl, Math.max(0, tsMs / 1000 - seg.start));
   }
 
   /** Whether a moment has recorded footage behind it, according to the day's
@@ -982,16 +993,18 @@ class FrigateTimelineCard extends HTMLElement {
    * which is the resource this entire line of work exists to protect. */
   _showScrubFrame(tsMs, base) {
     const sec = Math.floor(tsMs / 1000);
-    // Swapping element type happens once per drag at most, where the last
-    // assembled hour meets the one still being lived through.
-    if (this._previewEl?.tagName !== "IMG") {
-      this._teardownScrubPreview();
+    // Also built once and kept. A drag can cross the boundary between the
+    // last assembled hour and the one in progress repeatedly, and rebuilding
+    // an element on each crossing is the same churn the filmstrip suffered.
+    if (!this._previewImgEl) {
       const img = document.createElement("img");
       img.className = "ftc-preview";
       img.decoding = "async";
       this._zoomEl.appendChild(img);
-      this._previewEl = img;
+      this._previewImgEl = img;
     }
+    if (this._previewVideoEl) this._previewVideoEl.hidden = true;
+    this._previewImgEl.hidden = false;
     // One request in flight at a time, with only the newest position held
     // behind it. A finger crossing an hour asks for hundreds of moments and
     // every one of them is a fetch — unlike the filmstrip, where the same
@@ -1017,7 +1030,7 @@ class FrigateTimelineCard extends HTMLElement {
     const loader = new Image();
     loader.decoding = "async";
     loader.onload = () => {
-      if (this._previewEl?.tagName === "IMG") this._previewEl.src = url;
+      if (this._previewImgEl) this._previewImgEl.src = url;
       this._snapSettled();
     };
     loader.onerror = () => this._snapSettled();
@@ -1061,15 +1074,17 @@ class FrigateTimelineCard extends HTMLElement {
    * re-triggers, since `seeked` cannot fire for a seek that never started.
    * That is why the picture sat at the start of each new hour. */
   _applyPendingSeek(video) {
-    if (this._previewEl !== video || this._previewWantSec == null) return;
+    if (this._previewVideoEl !== video || this._previewWantSec == null) return;
     const want = this._previewWantSec;
     this._previewWantSec = null;
     this._seekPreview(video, want);
   }
 
   _teardownScrubPreview() {
-    this._previewEl?.remove();
-    this._previewEl = null;
+    this._previewVideoEl?.remove();
+    this._previewVideoEl = null;
+    this._previewImgEl?.remove();
+    this._previewImgEl = null;
     this._previewSrc = null;
     this._previewWantSec = null;
     // A request still in flight when the element goes will never report
