@@ -126,6 +126,10 @@ const OFFSCREEN_GRACE_MS = 2500;
  * level: a fixed number of minutes is a different amount of screen at
  * every zoom, which is what left the pill overflowing at a day's width. */
 const NOW_RIGHT_MARGIN_PX = 48;
+/** Height asked of Frigate for a scrub still. The picture is a stand-in
+ * under a moving finger, not something to read detail from, and the full
+ * frame is 350KB against 11KB at this size — measured, on this camera. */
+const SCRUB_SNAPSHOT_HEIGHT = 180;
 /** How close a dragged selector has to come to the present before letting go
  * means going back to live. In pixels, like NOW_RIGHT_MARGIN_PX above and for
  * the same reason: a tolerance in seconds is half the strip at one zoom and
@@ -564,9 +568,15 @@ class FrigateTimelineCard extends HTMLElement {
            in, .zoomed drops to none so a one-finger drag pans the image
            instead — see _wireStageZoom(). Note: no backticks in here, this
            whole block lives inside a template literal. */
+        /* The radius has to be repeated here, not just left to ha-card. The
+           overflow:hidden that keeps a zoomed picture inside the frame opens
+           a clipping rectangle of its own, with square corners, and this
+           element sits at the top of the card — so without it the picture
+           covers the card's rounded corners with sharp ones. */
         frigate-timeline-card .ftc-stage {
           position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000;
           overflow: hidden; touch-action: pan-y;
+          border-radius: var(--ha-card-border-radius, 12px) var(--ha-card-border-radius, 12px) 0 0;
         }
         frigate-timeline-card .ftc-stage.zoomed { touch-action: none; cursor: grab; }
         frigate-timeline-card .ftc-stage.panning { cursor: grabbing; }
@@ -586,6 +596,9 @@ class FrigateTimelineCard extends HTMLElement {
            media decoders and blacked out every camera at once. */
         frigate-timeline-card .ftc-preview {
           position: absolute; inset: 0; z-index: 2;
+        }
+        frigate-timeline-card img.ftc-preview {
+          width: 100%; height: 100%; object-fit: contain; background: #000;
         }
         frigate-timeline-card .ftc-toolbar {
           display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -905,12 +918,14 @@ class FrigateTimelineCard extends HTMLElement {
    * PreviewPlayer does exactly `time - preview.start`. */
   _showScrubPreview(tsMs) {
     if (!this._zoomEl) return;
+    const base = this._config.frigate_url.replace(/\/+$/, "");
     const seg = this._previewFor(tsMs);
     if (!seg) {
-      this._teardownScrubPreview();
+      // No filmstrip means the hour is still being lived through, so fall
+      // back to the single frames Frigate has written so far.
+      this._showScrubFrame(tsMs, base);
       return;
     }
-    const base = this._config.frigate_url.replace(/\/+$/, "");
 
     if (!this._previewEl || this._previewSrc !== seg.src) {
       this._teardownScrubPreview();
@@ -935,6 +950,50 @@ class FrigateTimelineCard extends HTMLElement {
     this._seekPreview(this._previewEl, Math.max(0, tsMs / 1000 - seg.start));
   }
 
+  /** Stands in for the filmstrip with the newest still frame at or before
+   * the moment under the finger. An <img> needs no media decoder at all,
+   * which is the resource this entire line of work exists to protect. */
+  _showScrubFrame(tsMs, base) {
+    const sec = Math.floor(tsMs / 1000);
+    // Swapping element type happens once per drag at most, where the last
+    // assembled hour meets the one still being lived through.
+    if (this._previewEl?.tagName !== "IMG") {
+      this._teardownScrubPreview();
+      const img = document.createElement("img");
+      img.className = "ftc-preview";
+      img.decoding = "async";
+      // A moment with no recording behind it answers 404. Keeping whatever
+      // is on screen beats blanking the picture over every gap.
+      img.addEventListener("error", () => this._snapSettled());
+      img.addEventListener("load", () => this._snapSettled());
+      this._zoomEl.appendChild(img);
+      this._previewEl = img;
+    }
+    // One request in flight at a time, with only the newest position held
+    // behind it. A finger crossing an hour asks for hundreds of moments and
+    // every one of them is a fetch — unlike the filmstrip, where the same
+    // movement is a seek inside a file already in hand.
+    if (this._snapInFlight) {
+      this._snapWantSec = sec;
+      return;
+    }
+    this._snapInFlight = true;
+    this._snapWantSec = null;
+    this._previewEl.src =
+      `${base}/api/${encodeURIComponent(this._cameraObjectId())}` +
+      `/recordings/${sec}/snapshot.jpg?height=${SCRUB_SNAPSHOT_HEIGHT}`;
+  }
+
+  /** Releases the single in-flight snapshot slot and, if the finger moved on
+   * while that one was loading, asks for where it ended up instead. */
+  _snapSettled() {
+    this._snapInFlight = false;
+    const want = this._snapWantSec;
+    if (want == null || !this._scrubbing) return;
+    this._snapWantSec = null;
+    this._showScrubFrame(want * 1000, this._config.frigate_url.replace(/\/+$/, ""));
+  }
+
   /** Writing currentTime faster than the decoder answers only makes it
    * stutter, so a seek arriving mid-seek is held and applied when the last
    * one lands. A finger outruns the decoder either way; this keeps the
@@ -952,6 +1011,10 @@ class FrigateTimelineCard extends HTMLElement {
     this._previewEl = null;
     this._previewSrc = null;
     this._previewWantSec = null;
+    // A request still in flight when the element goes will never report
+    // back, and a slot left held would block every snapshot after it.
+    this._snapInFlight = false;
+    this._snapWantSec = null;
   }
 
   /** True when a scrubbed moment is close enough to the present that letting
