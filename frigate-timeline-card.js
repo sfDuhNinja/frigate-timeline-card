@@ -602,8 +602,11 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-preview {
           position: absolute; inset: 0; z-index: 2;
         }
+        /* Deliberately no background: until the first still arrives, and
+           across every gap where none exists, the paused footage underneath
+           shows through instead of a black rectangle. */
         frigate-timeline-card img.ftc-preview {
-          width: 100%; height: 100%; object-fit: contain; background: #000;
+          width: 100%; height: 100%; object-fit: contain;
         }
         frigate-timeline-card .ftc-toolbar {
           display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -967,10 +970,6 @@ class FrigateTimelineCard extends HTMLElement {
       const img = document.createElement("img");
       img.className = "ftc-preview";
       img.decoding = "async";
-      // A moment with no recording behind it answers 404. Keeping whatever
-      // is on screen beats blanking the picture over every gap.
-      img.addEventListener("error", () => this._snapSettled());
-      img.addEventListener("load", () => this._snapSettled());
       this._zoomEl.appendChild(img);
       this._previewEl = img;
     }
@@ -984,9 +983,23 @@ class FrigateTimelineCard extends HTMLElement {
     }
     this._snapInFlight = true;
     this._snapWantSec = null;
-    this._previewEl.src =
+    const url =
       `${base}/api/${encodeURIComponent(this._cameraObjectId())}` +
       `/recordings/${sec}/snapshot.jpg?height=${SCRUB_SNAPSHOT_HEIGHT}`;
+    // Loaded detached and only shown once it has actually arrived. These
+    // cameras record on detection, so the quiet stretches between events
+    // have no recording behind them and answer 404 — and assigning a failing
+    // URL straight to a visible <img> empties it, which is why scrubbing
+    // between events went black. On failure the picture is simply left
+    // alone: the last still, or the paused footage under it.
+    const loader = new Image();
+    loader.decoding = "async";
+    loader.onload = () => {
+      if (this._previewEl?.tagName === "IMG") this._previewEl.src = url;
+      this._snapSettled();
+    };
+    loader.onerror = () => this._snapSettled();
+    loader.src = url;
   }
 
   /** Releases the single in-flight snapshot slot and, if the finger moved on
