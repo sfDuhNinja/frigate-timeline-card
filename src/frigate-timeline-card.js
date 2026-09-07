@@ -615,6 +615,15 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-track {
           position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
           background: #141414; touch-action: none;
+          height: var(--ftc-track-h, 44px);
+        }
+        /* A phone gets exactly the configured height; anything tablet-sized
+           and up gets 15px more, where there is room for it and the strip is
+           read from further away. Done as a media query rather than in JS so
+           it follows a rotation or a resized window on its own — the motion
+           canvas re-reads clientHeight on every draw, so it keeps up. */
+        @media (min-width: 768px) {
+          frigate-timeline-card .ftc-track { height: calc(var(--ftc-track-h, 44px) + 15px); }
         }
         frigate-timeline-card .ftc-band {
           position: absolute; top: 0; bottom: 0; pointer-events: none;
@@ -677,7 +686,9 @@ class FrigateTimelineCard extends HTMLElement {
     this._dayLabelEl = this.querySelector(".ftc-daylabel");
     this._nowPillEl = this.querySelector(".ftc-now-pill");
     this._nowLineEl = this.querySelector(".ftc-now-line");
-    this._trackEl.style.height = `${this._config.height}px`;
+    // Fed to CSS rather than set as a height directly: an inline height would
+    // outrank the stylesheet, and the tablet/desktop rule above needs to win.
+    this.style.setProperty("--ftc-track-h", `${this._config.height}px`);
     this._buildControlBar();
     this._wireTrackInteraction();
     this._wireNowLineScrub();
@@ -1099,8 +1110,10 @@ class FrigateTimelineCard extends HTMLElement {
     this._zoomScale = 1;
     this._zoomX = 0;
     this._zoomY = 0;
+    this._stagePinching = false;
 
-    // Live pointers by id. Two entries means a pinch is in progress.
+    // Live pointers by id. More than one means the touch handlers own the
+    // gesture, and the single-finger pan must keep its hands off it.
     const points = new Map();
     let pinchStartDist = 0;
     let pinchStartScale = 1;
@@ -1141,21 +1154,66 @@ class FrigateTimelineCard extends HTMLElement {
       { passive: false },
     );
 
+    // Pinch runs on touch events rather than pointer events, and cancels the
+    // default from touchstart onward. That is the entire fix for a pinch that
+    // used to stall halfway through: touch-action pan-y leaves the browser
+    // free to read a two-finger drag as a scroll, and the instant it decides
+    // to, it cancels our pointers and the gesture dies mid-zoom. Cancelling
+    // the default on touchstart stops that scroll ever starting — something
+    // touch-action alone cannot say, because one finger must still scroll the
+    // dashboard at 1x. It is also how the timeline's own pinch works.
+    const touchDist = (t) =>
+      Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    stage.addEventListener(
+      "touchstart",
+      (e) => {
+        if (e.touches.length !== 2) return;
+        e.preventDefault();
+        this._stagePinching = true;
+        panning = false;
+        stage.classList.remove("panning");
+        // Guard the divisor: two fingers landing on one pixel would otherwise
+        // make every later ratio Infinity.
+        pinchStartDist = touchDist(e.touches) || 1;
+        pinchStartScale = this._zoomScale;
+      },
+      { passive: false },
+    );
+    stage.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!this._stagePinching || e.touches.length !== 2) return;
+        e.preventDefault();
+        const r = stage.getBoundingClientRect();
+        const [a, b] = e.touches;
+        zoomAbout(
+          (a.clientX + b.clientX) / 2 - r.left - r.width / 2,
+          (a.clientY + b.clientY) / 2 - r.top - r.height / 2,
+          pinchStartScale * (touchDist(e.touches) / pinchStartDist),
+        );
+      },
+      { passive: false },
+    );
+    // Lifting one finger ends the pinch rather than handing the remaining one
+    // to the pan, which would jerk the image at the end of every zoom.
+    const endPinch = (e) => {
+      if (e.touches.length < 2) this._stagePinching = false;
+    };
+    stage.addEventListener("touchend", endPinch);
+    stage.addEventListener("touchcancel", endPinch);
+
     stage.addEventListener("pointerdown", (e) => {
       points.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (points.size === 2) {
-        const [a, b] = [...points.values()];
-        // Guard the divisor: two pointers landing on the same pixel would
-        // otherwise make every later ratio Infinity.
-        pinchStartDist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
-        pinchStartScale = this._zoomScale;
+      // A second finger means a pinch, which the touch handlers below own.
+      // Drop any pan so the two can never move the image at once.
+      if (points.size > 1) {
         panning = false;
         stage.classList.remove("panning");
         return;
       }
       // One finger pans only once zoomed in; at 1x the gesture is the
       // dashboard's to scroll with.
-      if (points.size === 1 && this._zoomScale > 1) {
+      if (this._zoomScale > 1) {
         panning = true;
         panStartX = e.clientX;
         panStartY = e.clientY;
@@ -1169,16 +1227,7 @@ class FrigateTimelineCard extends HTMLElement {
       if (!points.has(e.pointerId)) return;
       points.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-      if (points.size >= 2) {
-        const [a, b] = [...points.values()];
-        const r = stage.getBoundingClientRect();
-        zoomAbout(
-          (a.x + b.x) / 2 - r.left - r.width / 2,
-          (a.y + b.y) / 2 - r.top - r.height / 2,
-          pinchStartScale * (Math.hypot(a.x - b.x, a.y - b.y) / pinchStartDist),
-        );
-        return;
-      }
+      if (points.size > 1 || this._stagePinching) return;
 
       if (panning) {
         this._zoomX = panOriginX + (e.clientX - panStartX);
@@ -1189,9 +1238,13 @@ class FrigateTimelineCard extends HTMLElement {
 
     // Lifting one finger of a pinch must not turn the remaining one into a
     // pan mid-gesture, so panning only ever restarts on a fresh pointerdown.
+    // Deliberately does not touch pinchStartDist: on a touch screen pointer
+    // and touch events both fire, so a pointercancel arriving mid-pinch would
+    // zero the divisor under the touchmove handler and send the next ratio to
+    // Infinity — a snap straight to maximum zoom. The touch handlers own that
+    // value from start to finish.
     const release = (e) => {
       points.delete(e.pointerId);
-      if (points.size < 2) pinchStartDist = 0;
       if (points.size === 0) {
         panning = false;
         stage.classList.remove("panning");
