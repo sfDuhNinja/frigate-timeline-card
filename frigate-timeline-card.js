@@ -852,9 +852,7 @@ class FrigateTimelineCard extends HTMLElement {
 
   _wireNowLineScrub() {
     if (!this._nowLineEl) return;
-    const SCRUB_THROTTLE_MS = 350;
     let dragging = false;
-    let throttleTimer = null;
     let lastTs = null;
 
     const fracFromClientX = (x) => {
@@ -905,7 +903,7 @@ class FrigateTimelineCard extends HTMLElement {
           // The window moved under a stationary finger, so the same point
           // on screen is a different moment now.
           const frac = fracFromClientX(lastClientX);
-          if (frac != null) scheduleSeek(previewAt(frac));
+          if (frac != null) trackSeekTarget(previewAt(frac));
         }
       }
       autoPan = requestAnimationFrame(stepAutoPan);
@@ -934,23 +932,22 @@ class FrigateTimelineCard extends HTMLElement {
       return ts;
     };
 
-    const scheduleSeek = (ts) => {
+    // Nothing loads while the finger is down. The drag only remembers where
+    // it means to land, and `stop()` loads that one moment.
+    //
+    // This used to seek every 350ms, and every seek tore the <video> out of
+    // the stage and built a new one around a fresh clip. A few seconds of
+    // scrubbing meant a dozen elements and a dozen clip loads back to back.
+    // iOS WKWebView keeps only a handful of media decoders and does not hand
+    // them back the moment an element is dropped, so the pool ran dry — and
+    // when it does, every video in the web view dies, not just this card's.
+    // That is why all three cameras went black together and why nothing but
+    // restarting the app brought them back.
+    //
+    // Frigate does the same thing: its player takes an isScrubbing flag and
+    // loads no video at all for as long as it is set.
+    const trackSeekTarget = (ts) => {
       lastTs = ts;
-      if (this._isAtNow(ts)) {
-        // Live is what lands on release, so there is nothing worth fetching
-        // here. Drop a seek queued from before the drag came back, too, or
-        // it would load a clip we abandon in the same breath.
-        if (throttleTimer) {
-          clearTimeout(throttleTimer);
-          throttleTimer = null;
-        }
-        return;
-      }
-      if (throttleTimer) return;
-      throttleTimer = setTimeout(() => {
-        throttleTimer = null;
-        if (lastTs != null) this._playAt(this._nearestPlayableMs(lastTs));
-      }, SCRUB_THROTTLE_MS);
     };
 
     this._nowLineEl.addEventListener("pointerdown", (e) => {
@@ -961,7 +958,7 @@ class FrigateTimelineCard extends HTMLElement {
       this._nowLineEl.classList.add("scrubbing");
       lastClientX = e.clientX ?? null;
       const frac = fracFromEvent(e);
-      if (frac != null) scheduleSeek(previewAt(frac));
+      if (frac != null) trackSeekTarget(previewAt(frac));
       stopAutoPan();
       autoPan = requestAnimationFrame(stepAutoPan);
     });
@@ -970,7 +967,7 @@ class FrigateTimelineCard extends HTMLElement {
       lastClientX = e.clientX ?? e.touches?.[0]?.clientX ?? lastClientX;
       const frac = fracFromEvent(e);
       if (frac == null) return;
-      scheduleSeek(previewAt(frac));
+      trackSeekTarget(previewAt(frac));
     };
     const stop = () => {
       if (!dragging) return;
@@ -979,10 +976,6 @@ class FrigateTimelineCard extends HTMLElement {
       lastClientX = null;
       this._scrubbing = false;
       this._nowLineEl.classList.remove("scrubbing");
-      if (throttleTimer) {
-        clearTimeout(throttleTimer);
-        throttleTimer = null;
-      }
       // Dragged back to the present means back to live, not a clip that
       // happens to start there — the whole point of returning is the stream.
       if (lastTs != null) {
