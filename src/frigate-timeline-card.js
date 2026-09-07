@@ -413,6 +413,12 @@ class FrigateTimelineCard extends HTMLElement {
       clearTimeout(this._suspendTimer);
       this._suspendTimer = null;
     }
+    // A card pulled from the dashboard mid-gesture would otherwise leave a
+    // frame in flight, waking to draw into an element nothing points at.
+    if (this._renderRaf != null) {
+      cancelAnimationFrame(this._renderRaf);
+      this._renderRaf = null;
+    }
     window.removeEventListener("pointermove", this._onWindowPointerMove);
     window.removeEventListener("pointerup", this._onWindowPointerUp);
     window.removeEventListener("pointercancel", this._onWindowPointerUp);
@@ -773,7 +779,8 @@ class FrigateTimelineCard extends HTMLElement {
     this._windowHours = Math.min(24, Math.max(MIN_HOURS, hours));
     this._centerMs = Math.min(day.end, Math.max(day.start, centerMs));
     this._updateZoomLabel();
-    this._renderTimeline();
+    // Wheel and pinch both land here, both faster than the screen redraws.
+    this._scheduleRender();
   }
 
   /** Resets to the configured default zoom window (10h unless overridden).
@@ -873,7 +880,7 @@ class FrigateTimelineCard extends HTMLElement {
           const msPerPx = (win.end - win.start) / rect.width;
           const center = this._centerMs ?? win.start + (win.end - win.start) / 2;
           this._centerMs = Math.min(day.end, Math.max(day.start, center + push * MAX_PAN_PX_PER_FRAME * msPerPx));
-          this._renderTimeline();
+          this._scheduleRender();
           // The window moved under a stationary finger, so the same point
           // on screen is a different moment now.
           const frac = fracFromClientX(lastClientX);
@@ -1003,7 +1010,7 @@ class FrigateTimelineCard extends HTMLElement {
         const win = this._currentWindow();
         const msPerPx = (win.end - win.start) / rect.width;
         this._centerMs = startCenterMs - dx * msPerPx;
-        this._renderTimeline();
+        this._scheduleRender();
         return;
       }
       const frac = fracFromEvent(e);
@@ -2901,6 +2908,26 @@ class FrigateTimelineCard extends HTMLElement {
       else ctx.fillRect(x, y, barWidth, barHeight);
     }
     if (rounded) ctx.fill();
+  }
+
+  /** Coalesces render requests to at most one per displayed frame.
+   *
+   * Gestures deliver far faster than a screen can draw — an iPad reports
+   * pointermove at up to 120Hz — and every one of those used to run a whole
+   * synchronous `_renderTimeline()`: two passes over every segment building
+   * markup, an innerHTML swap that re-lays out each band, a canvas redraw
+   * that measures the track first, and the tick row rebuilt on top. The work
+   * never fit in the interval between two events, so it queued, and a long
+   * enough drag through the timeline took the tab down with it.
+   *
+   * Anything driven by a gesture must come through here. Callers that fire
+   * once — a day change, arriving data — may still render directly. */
+  _scheduleRender() {
+    if (this._renderRaf != null) return;
+    this._renderRaf = requestAnimationFrame(() => {
+      this._renderRaf = null;
+      this._renderTimeline();
+    });
   }
 
   _renderTimeline() {
