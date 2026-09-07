@@ -126,6 +126,11 @@ const OFFSCREEN_GRACE_MS = 2500;
  * level: a fixed number of minutes is a different amount of screen at
  * every zoom, which is what left the pill overflowing at a day's width. */
 const NOW_RIGHT_MARGIN_PX = 48;
+/** How close a dragged selector has to come to the present before letting go
+ * means going back to live. In pixels, like NOW_RIGHT_MARGIN_PX above and for
+ * the same reason: a tolerance in seconds is half the strip at one zoom and
+ * invisible at another, so it would feel like a different control at each. */
+const NOW_SNAP_PX = 12;
 /** Ceiling for the stage's pinch/wheel zoom. Past roughly this the camera's
  * own pixels run out and further magnification only enlarges the blur. */
 const MAX_STAGE_ZOOM = 6;
@@ -829,6 +834,17 @@ class FrigateTimelineCard extends HTMLElement {
    * pointer every frame), but throttles the actual `_playAt()` reload —
    * every pixel would tear down and recreate the whole video/hls
    * attachment, which is far too expensive to do per pointermove. */
+  /** True when a scrubbed moment is close enough to the present that letting
+   * go should return to live rather than load a clip. Only meaningful while
+   * viewing today — a past day has no "now" anywhere on its strip. */
+  _isAtNow(ts) {
+    if (this._dayKey !== todayKey()) return false;
+    const win = this._currentWindow();
+    const width = Math.round(this._trackEl?.clientWidth) || 300;
+    const toleranceMs = ((win.end - win.start) / width) * NOW_SNAP_PX;
+    return ts >= Date.now() - toleranceMs;
+  }
+
   _wireNowLineScrub() {
     if (!this._nowLineEl) return;
     const SCRUB_THROTTLE_MS = 350;
@@ -903,11 +919,28 @@ class FrigateTimelineCard extends HTMLElement {
       this._nowLineEl.style.left = `${pct}%`;
       this._nowPillEl.style.left = `${pct}%`;
       this._nowPillEl.textContent = this._formatClock(new Date(ts));
+      // Blue the moment the drag leaves the present, red again as it comes
+      // back — so the colour says where you will land before you let go,
+      // rather than after. `_updateNowPill` stands down while scrubbing, so
+      // nothing else is writing these two classes right now.
+      const atNow = this._isAtNow(ts);
+      this._nowPillEl.classList.toggle("clip", !atNow);
+      this._nowLineEl.classList.toggle("clip", !atNow);
       return ts;
     };
 
     const scheduleSeek = (ts) => {
       lastTs = ts;
+      if (this._isAtNow(ts)) {
+        // Live is what lands on release, so there is nothing worth fetching
+        // here. Drop a seek queued from before the drag came back, too, or
+        // it would load a clip we abandon in the same breath.
+        if (throttleTimer) {
+          clearTimeout(throttleTimer);
+          throttleTimer = null;
+        }
+        return;
+      }
       if (throttleTimer) return;
       throttleTimer = setTimeout(() => {
         throttleTimer = null;
@@ -945,7 +978,12 @@ class FrigateTimelineCard extends HTMLElement {
         clearTimeout(throttleTimer);
         throttleTimer = null;
       }
-      if (lastTs != null) this._playAt(this._nearestPlayableMs(lastTs));
+      // Dragged back to the present means back to live, not a clip that
+      // happens to start there — the whole point of returning is the stream.
+      if (lastTs != null) {
+        if (this._isAtNow(lastTs)) this._showLive();
+        else this._playAt(this._nearestPlayableMs(lastTs));
+      }
     };
     this._windowDragStop = stop;
   }
