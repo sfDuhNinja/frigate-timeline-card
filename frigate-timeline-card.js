@@ -947,8 +947,18 @@ class FrigateTimelineCard extends HTMLElement {
       video.muted = true;
       video.playsInline = true;
       video.controls = false;
-      video.preload = "auto";
-      video.addEventListener("seeked", () => this._applyPendingSeek(video));
+      // "metadata", not "auto": an hour of filmstrip is 4MB, and pulling all
+      // of it before anything can be shown is survivable on wifi and
+      // hopeless on mobile data. The files answer range requests, so a seek
+      // fetches the stretch it needs.
+      video.preload = "metadata";
+      video.addEventListener("seeked", () => {
+        // It has actually delivered a frame, which is the only honest test
+        // of whether this connection can carry the filmstrip at all. Until
+        // it passes, stills carry the drag.
+        this._filmstripReady = true;
+        this._applyPendingSeek(video);
+      });
       video.addEventListener("loadedmetadata", () => this._applyPendingSeek(video));
       this._zoomEl.appendChild(video);
       this._previewVideoEl = video;
@@ -958,11 +968,23 @@ class FrigateTimelineCard extends HTMLElement {
       // A position queued against the previous hour means nothing in this
       // one; leaving it would seek the new file to the old offset.
       this._previewWantSec = null;
+      // Each hour has to earn its place again — the connection may have
+      // carried the last one and not this.
+      this._filmstripReady = false;
       this._previewVideoEl.src = base + seg.src;
     }
-    if (this._previewImgEl) this._previewImgEl.hidden = true;
-    this._previewVideoEl.hidden = false;
+    // Asked for either way: answering is how the filmstrip proves itself.
     this._seekPreview(this._previewVideoEl, Math.max(0, tsMs / 1000 - seg.start));
+
+    if (this._filmstripReady) {
+      if (this._previewImgEl) this._previewImgEl.hidden = true;
+      this._previewVideoEl.hidden = false;
+      return;
+    }
+    // Not proven yet, so stills carry the drag meanwhile. On wifi that is
+    // the first fraction of a second; on mobile data it may be the whole
+    // drag, which is the point — 11KB a position against 4MB an hour.
+    this._showScrubFrame(tsMs, base);
   }
 
   /** Whether a moment has recorded footage behind it, according to the day's
@@ -1087,6 +1109,7 @@ class FrigateTimelineCard extends HTMLElement {
     this._previewImgEl = null;
     this._previewSrc = null;
     this._previewWantSec = null;
+    this._filmstripReady = false;
     // A request still in flight when the element goes will never report
     // back, and a slot left held would block every snapshot after it.
     this._snapInFlight = false;
