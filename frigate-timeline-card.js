@@ -299,6 +299,8 @@ class FrigateTimelineCard extends HTMLElement {
     this._recordings = [];
     this._fetchKey = null;
     this._recordingsKey = null;
+    this._previews = [];
+    this._previewsKey = null;
     this._resetZoom();
     this._updateDayNavState();
     if (!this._built) this._build();
@@ -429,6 +431,9 @@ class FrigateTimelineCard extends HTMLElement {
       cancelAnimationFrame(this._renderRaf);
       this._renderRaf = null;
     }
+    // A card removed mid-drag would otherwise leave a filmstrip decoding for
+    // nobody — the very resource this whole change exists to conserve.
+    this._teardownScrubPreview();
     window.removeEventListener("pointermove", this._onWindowPointerMove);
     window.removeEventListener("pointerup", this._onWindowPointerUp);
     window.removeEventListener("pointercancel", this._onWindowPointerUp);
@@ -579,6 +584,13 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-zoom ha-camera-stream,
         frigate-timeline-card .ftc-zoom video {
           width: 100%; height: 100%; display: block; object-fit: contain; background: #000;
+        }
+        /* Covers whatever the stage was showing for the length of a drag.
+           The footage underneath is left alone — never torn down — which is
+           the point: rebuilding it per scrub step is what exhausted iOS's
+           media decoders and blacked out every camera at once. */
+        frigate-timeline-card .ftc-preview {
+          position: absolute; inset: 0; z-index: 2;
         }
         frigate-timeline-card .ftc-toolbar {
           display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -839,6 +851,114 @@ class FrigateTimelineCard extends HTMLElement {
    * pointer every frame), but throttles the actual `_playAt()` reload —
    * every pixel would tear down and recreate the whole video/hls
    * attachment, which is far too expensive to do per pointermove. */
+  // ─── Preview în timpul tragerii ──────────────────────────────────────
+
+  /** Frigate keeps a low-resolution filmstrip per camera, cut into hour-long
+   * segments, and that is what its own UI shows while you drag. The card
+   * needs the segment list to use them: the filenames carry sub-second
+   * timestamps (…400.102293-…000.09466.mp4) that cannot be guessed.
+   *
+   * The list is JSON, so it is a fetch, and Frigate sends no CORS headers at
+   * all — this only succeeds when `frigate_url` points at something that
+   * adds them. Failure is expected and silent: previews stay off and the
+   * drag behaves as it did before, showing the frame already on screen. */
+  async _ensurePreviews() {
+    const win = dayWindow(this._dayKey);
+    if (!Number.isFinite(win.start)) return;
+    const camId = this._cameraObjectId();
+    const key = `${this._dayKey}|${camId}`;
+    if (this._previewsKey === key) return;
+    this._previewsKey = key;
+    this._previews = [];
+
+    const base = this._config.frigate_url.replace(/\/+$/, "");
+    const url =
+      `${base}/api/preview/${encodeURIComponent(camId)}` +
+      `/start/${Math.floor(win.start / 1000)}/end/${Math.ceil(win.end / 1000)}`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const list = await res.json();
+      if (this._previewsKey !== key) return; // superseded by another day
+      this._previews = (Array.isArray(list) ? list : [])
+        .filter((p) => p?.src && Number.isFinite(Number(p.start)))
+        .map((p) => ({ src: p.src, start: Number(p.start), end: Number(p.end) }))
+        .sort((a, b) => a.start - b.start);
+    } catch (err) {
+      // Almost always CORS, which no amount of retrying fixes.
+      console.debug("[frigate-timeline-card] previews unavailable", err);
+    }
+  }
+
+  /** The segment covering a moment, or nothing. Frigate's own player makes
+   * the same check before seeking and simply declines when it falls in a
+   * gap — there is no filmstrip for a stretch that was never recorded. */
+  _previewFor(tsMs) {
+    const sec = tsMs / 1000;
+    return (this._previews || []).find((p) => sec >= p.start && sec <= p.end) || null;
+  }
+
+  /** Shows the filmstrip for a dragged moment.
+   *
+   * One <video> for the whole drag, reused across seeks and only re-sourced
+   * when the drag crosses into another hour. Seeking inside it is a
+   * currentTime write, which costs nothing like building a player does.
+   *
+   * The offset is wall-clock, not proportional: these segments run in real
+   * time (an hour of preview really is 3600 seconds long), so the position
+   * is simply how far the moment sits past the segment's start. Frigate's
+   * PreviewPlayer does exactly `time - preview.start`. */
+  _showScrubPreview(tsMs) {
+    if (!this._zoomEl) return;
+    const seg = this._previewFor(tsMs);
+    if (!seg) {
+      this._teardownScrubPreview();
+      return;
+    }
+    const base = this._config.frigate_url.replace(/\/+$/, "");
+
+    if (!this._previewEl || this._previewSrc !== seg.src) {
+      this._teardownScrubPreview();
+      const video = document.createElement("video");
+      video.className = "ftc-preview";
+      video.muted = true;
+      video.playsInline = true;
+      video.controls = false;
+      video.preload = "auto";
+      video.src = base + seg.src;
+      video.addEventListener("error", () => this._teardownScrubPreview());
+      video.addEventListener("seeked", () => {
+        if (this._previewEl !== video || this._previewWantSec == null) return;
+        const want = this._previewWantSec;
+        this._previewWantSec = null;
+        this._seekPreview(video, want);
+      });
+      this._zoomEl.appendChild(video);
+      this._previewEl = video;
+      this._previewSrc = seg.src;
+    }
+    this._seekPreview(this._previewEl, Math.max(0, tsMs / 1000 - seg.start));
+  }
+
+  /** Writing currentTime faster than the decoder answers only makes it
+   * stutter, so a seek arriving mid-seek is held and applied when the last
+   * one lands. A finger outruns the decoder either way; this keeps the
+   * newest position rather than the stalest. */
+  _seekPreview(video, seconds) {
+    if (video.seeking || !(video.readyState >= 1)) {
+      this._previewWantSec = seconds;
+      return;
+    }
+    video.currentTime = seconds;
+  }
+
+  _teardownScrubPreview() {
+    this._previewEl?.remove();
+    this._previewEl = null;
+    this._previewSrc = null;
+    this._previewWantSec = null;
+  }
+
   /** True when a scrubbed moment is close enough to the present that letting
    * go should return to live rather than load a clip. Only meaningful while
    * viewing today — a past day has no "now" anywhere on its strip. */
@@ -929,6 +1049,10 @@ class FrigateTimelineCard extends HTMLElement {
       const atNow = this._isAtNow(ts);
       this._nowPillEl.classList.toggle("clip", !atNow);
       this._nowLineEl.classList.toggle("clip", !atNow);
+      // Resting on the present means live is what lands, and the stream is
+      // already underneath — a filmstrip over it would only be in the way.
+      if (atNow) this._teardownScrubPreview();
+      else this._showScrubPreview(ts);
       return ts;
     };
 
@@ -976,6 +1100,9 @@ class FrigateTimelineCard extends HTMLElement {
       lastClientX = null;
       this._scrubbing = false;
       this._nowLineEl.classList.remove("scrubbing");
+      // Real footage takes over from here, so the filmstrip goes first —
+      // left up, it would hide the clip loading underneath it.
+      this._teardownScrubPreview();
       // Dragged back to the present means back to live, not a clip that
       // happens to start there — the whole point of returning is the stream.
       if (lastTs != null) {
@@ -2676,6 +2803,9 @@ class FrigateTimelineCard extends HTMLElement {
     }
     this._renderTimeline();
     this._ensureRecordings();
+    // Fire and forget: a drag uses whatever has arrived by the time it
+    // starts, and a list that never arrives simply means no filmstrip.
+    this._ensurePreviews();
   }
 
   /**
