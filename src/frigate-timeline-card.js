@@ -126,6 +126,9 @@ const OFFSCREEN_GRACE_MS = 2500;
  * level: a fixed number of minutes is a different amount of screen at
  * every zoom, which is what left the pill overflowing at a day's width. */
 const NOW_RIGHT_MARGIN_PX = 48;
+/** Ceiling for the stage's pinch/wheel zoom. Past roughly this the camera's
+ * own pixels run out and further magnification only enlarges the blur. */
+const MAX_STAGE_ZOOM = 6;
 // Minimal inline icon set (Material Design icon paths) — no emoji anywhere
 // in the control bar, per design requirement. `currentColor` fill means
 // each button's own text color (and CSS var overrides) apply automatically.
@@ -472,7 +475,7 @@ class FrigateTimelineCard extends HTMLElement {
     // frame stays on screen instead of a black card. <ha-camera-stream>
     // has no equivalent — it keeps streaming until it is removed.
     if (this._config?.live_source !== "frigate") {
-      this._stageEl.innerHTML = "";
+      this._zoomEl.innerHTML = "";
       this._streamEl = null;
     }
   }
@@ -518,7 +521,7 @@ class FrigateTimelineCard extends HTMLElement {
     this._built = true;
     this.innerHTML = `
       <ha-card>
-        <div class="ftc-stage"></div>
+        <div class="ftc-stage"><div class="ftc-zoom"></div></div>
         <div class="ftc-toolbar">
           <div class="ftc-daynav">
             <button class="ftc-navbtn" data-dir="-1" title="Previous day">‹</button>
@@ -538,11 +541,27 @@ class FrigateTimelineCard extends HTMLElement {
       </ha-card>
       <style>
         frigate-timeline-card ha-card { overflow: hidden; padding: 0; }
+        /* touch-action: pan-y is the load-bearing half of not hijacking the
+           dashboard: one finger still scrolls the page vertically, but the
+           browser stops claiming two-finger pinch as page zoom, which is what
+           lets the pointer events below ever reach us. Once actually zoomed
+           in, .zoomed drops to none so a one-finger drag pans the image
+           instead — see _wireStageZoom(). Note: no backticks in here, this
+           whole block lives inside a template literal. */
         frigate-timeline-card .ftc-stage {
           position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000;
+          overflow: hidden; touch-action: pan-y;
         }
-        frigate-timeline-card .ftc-stage ha-camera-stream,
-        frigate-timeline-card .ftc-stage video {
+        frigate-timeline-card .ftc-stage.zoomed { touch-action: none; cursor: grab; }
+        frigate-timeline-card .ftc-stage.panning { cursor: grabbing; }
+        /* The transform layer. Scaling this rather than the video element
+           means the same code works for ha-camera-stream, which never
+           exposes a video element of its own to us. */
+        frigate-timeline-card .ftc-zoom {
+          position: absolute; inset: 0; transform-origin: 50% 50%;
+        }
+        frigate-timeline-card .ftc-zoom ha-camera-stream,
+        frigate-timeline-card .ftc-zoom video {
           width: 100%; height: 100%; display: block; object-fit: contain; background: #000;
         }
         frigate-timeline-card .ftc-toolbar {
@@ -622,12 +641,17 @@ class FrigateTimelineCard extends HTMLElement {
           transform: translateX(-50%); pointer-events: auto; z-index: 3;
           cursor: ew-resize; touch-action: none;
         }
+        /* The drop-shadow is what makes "more contrast" hold everywhere: the
+           line crosses both the dark track and the white motion histogram,
+           and a bright line alone vanishes against the latter. A dark halo
+           keeps an edge under it on both. */
         frigate-timeline-card .ftc-now-line::after {
           content: ""; position: absolute; top: 0; bottom: 0; left: 50%;
-          border-left: 1px dashed rgba(255, 255, 255, 0.5); transform: translateX(-50%);
+          border-left: 2px dashed rgba(255, 255, 255, 0.95); transform: translateX(-50%);
+          filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.9));
         }
-        frigate-timeline-card .ftc-now-line.clip::after { border-left-color: rgba(79, 195, 247, 0.7); }
-        frigate-timeline-card .ftc-now-line.scrubbing::after { border-left-color: #4fc3f7; border-left-width: 2px; }
+        frigate-timeline-card .ftc-now-line.clip::after { border-left-color: #4fc3f7; }
+        frigate-timeline-card .ftc-now-line.scrubbing::after { border-left-color: #4fc3f7; border-left-width: 3px; }
         frigate-timeline-card .ftc-scrub {
           position: absolute; top: 0; bottom: 0; width: 2px; background: #4fc3f7;
           box-shadow: 0 0 6px rgba(79, 195, 247, 0.9); pointer-events: none;
@@ -645,8 +669,10 @@ class FrigateTimelineCard extends HTMLElement {
       </style>
     `;
     this._stageEl = this.querySelector(".ftc-stage");
+    this._zoomEl = this.querySelector(".ftc-zoom");
     this._timelineEl = this.querySelector(".ftc-timeline");
     this._trackEl = this.querySelector(".ftc-track");
+    this._trackWrapEl = this.querySelector(".ftc-trackwrap");
     this._ticksEl = this.querySelector(".ftc-ticks");
     this._dayLabelEl = this.querySelector(".ftc-daylabel");
     this._nowPillEl = this.querySelector(".ftc-now-pill");
@@ -655,6 +681,7 @@ class FrigateTimelineCard extends HTMLElement {
     this._buildControlBar();
     this._wireTrackInteraction();
     this._wireNowLineScrub();
+    this._wireStageZoom();
     this._wireAutoHide();
     this._prevDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="-1"]');
     this._nextDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="1"]');
@@ -987,8 +1014,19 @@ class FrigateTimelineCard extends HTMLElement {
       if (frac != null) this._seekTo(frac);
     });
 
+    // Zoom binds to the wrapper, not the track. `.ftc-now-line` is a sibling
+    // of `.ftc-track` (see `_wireNowLineScrub`) that sits over it, 20px wide
+    // and taking pointer events of its own — so a wheel or pinch anywhere
+    // near the playhead targeted that line, never reached the track, and
+    // silently did nothing. The wrapper is the nearest ancestor of both, and
+    // every measurement below still reads the *track's* rect, so the
+    // coordinate math is unchanged by the move.
+    //
+    // Seek and pan stay on the track: the line has its own drag handler, and
+    // moving them here would have the two fight over the same gesture.
+
     // Desktop zoom: mouse wheel, centered on the cursor position.
-    this._trackEl.addEventListener(
+    this._trackWrapEl.addEventListener(
       "wheel",
       (e) => {
         e.preventDefault();
@@ -1009,7 +1047,7 @@ class FrigateTimelineCard extends HTMLElement {
     let pinchStartDist = null;
     let pinchStartHours = null;
     let pinchCenterMs = null;
-    this._trackEl.addEventListener(
+    this._trackWrapEl.addEventListener(
       "touchstart",
       (e) => {
         if (e.touches.length === 2) {
@@ -1028,7 +1066,7 @@ class FrigateTimelineCard extends HTMLElement {
       },
       { passive: false }
     );
-    this._trackEl.addEventListener(
+    this._trackWrapEl.addEventListener(
       "touchmove",
       (e) => {
         if (e.touches.length === 2 && pinchStartDist) {
@@ -1040,12 +1078,162 @@ class FrigateTimelineCard extends HTMLElement {
       },
       { passive: false }
     );
-    this._trackEl.addEventListener("touchend", (e) => {
+    this._trackWrapEl.addEventListener("touchend", (e) => {
       if (e.touches.length < 2) {
         pinchStartDist = null;
         this._pinchActive = false;
       }
     });
+  }
+
+  // ─── Zoom pe imagine ─────────────────────────────────────────────────
+
+  /** Pinch/wheel zoom over the stage, so a detail can be read without going
+   * fullscreen. The transform sits on `.ftc-zoom` rather than the <video>
+   * because live mode renders `ha-camera-stream`, which never hands us a
+   * video element of its own — transforming the container works for both. */
+  _wireStageZoom() {
+    const stage = this._stageEl;
+    if (!stage) return;
+
+    this._zoomScale = 1;
+    this._zoomX = 0;
+    this._zoomY = 0;
+
+    // Live pointers by id. Two entries means a pinch is in progress.
+    const points = new Map();
+    let pinchStartDist = 0;
+    let pinchStartScale = 1;
+    let panning = false;
+    let panStartX = 0;
+    let panStartY = 0;
+    let panOriginX = 0;
+    let panOriginY = 0;
+
+    /** Scales about a point given relative to the stage's centre, keeping
+     * whatever content sits under that point pinned beneath it. */
+    const zoomAbout = (cx, cy, nextScale) => {
+      const s = this._zoomScale;
+      const ns = Math.min(MAX_STAGE_ZOOM, Math.max(1, nextScale));
+      if (ns === s) return;
+      this._zoomX = cx - (cx - this._zoomX) * (ns / s);
+      this._zoomY = cy - (cy - this._zoomY) * (ns / s);
+      this._zoomScale = ns;
+      this._applyStageZoom();
+    };
+
+    stage.addEventListener(
+      "wheel",
+      (e) => {
+        // The stage is large and often under the cursor while reading the
+        // dashboard, so a bare wheel must keep scrolling the page. Zoom on
+        // the two gestures that unambiguously mean it: a trackpad pinch
+        // (which browsers deliver as a wheel with ctrlKey set) or an
+        // explicit Ctrl/Cmd+wheel. Once magnified, a plain wheel is allowed
+        // to zoom too — otherwise there is no way back out with a mouse.
+        if (!e.ctrlKey && !e.metaKey && this._zoomScale === 1) return;
+        e.preventDefault();
+        const r = stage.getBoundingClientRect();
+        const cx = e.clientX - r.left - r.width / 2;
+        const cy = e.clientY - r.top - r.height / 2;
+        zoomAbout(cx, cy, this._zoomScale * (e.deltaY < 0 ? 1.25 : 1 / 1.25));
+      },
+      { passive: false },
+    );
+
+    stage.addEventListener("pointerdown", (e) => {
+      points.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (points.size === 2) {
+        const [a, b] = [...points.values()];
+        // Guard the divisor: two pointers landing on the same pixel would
+        // otherwise make every later ratio Infinity.
+        pinchStartDist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+        pinchStartScale = this._zoomScale;
+        panning = false;
+        stage.classList.remove("panning");
+        return;
+      }
+      // One finger pans only once zoomed in; at 1x the gesture is the
+      // dashboard's to scroll with.
+      if (points.size === 1 && this._zoomScale > 1) {
+        panning = true;
+        panStartX = e.clientX;
+        panStartY = e.clientY;
+        panOriginX = this._zoomX;
+        panOriginY = this._zoomY;
+        stage.classList.add("panning");
+      }
+    });
+
+    stage.addEventListener("pointermove", (e) => {
+      if (!points.has(e.pointerId)) return;
+      points.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (points.size >= 2) {
+        const [a, b] = [...points.values()];
+        const r = stage.getBoundingClientRect();
+        zoomAbout(
+          (a.x + b.x) / 2 - r.left - r.width / 2,
+          (a.y + b.y) / 2 - r.top - r.height / 2,
+          pinchStartScale * (Math.hypot(a.x - b.x, a.y - b.y) / pinchStartDist),
+        );
+        return;
+      }
+
+      if (panning) {
+        this._zoomX = panOriginX + (e.clientX - panStartX);
+        this._zoomY = panOriginY + (e.clientY - panStartY);
+        this._applyStageZoom();
+      }
+    });
+
+    // Lifting one finger of a pinch must not turn the remaining one into a
+    // pan mid-gesture, so panning only ever restarts on a fresh pointerdown.
+    const release = (e) => {
+      points.delete(e.pointerId);
+      if (points.size < 2) pinchStartDist = 0;
+      if (points.size === 0) {
+        panning = false;
+        stage.classList.remove("panning");
+      }
+    };
+    stage.addEventListener("pointerup", release);
+    stage.addEventListener("pointercancel", release);
+
+    stage.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      this._resetStageZoom();
+    });
+  }
+
+  /** Writes the current zoom to the transform layer, clamping the pan so the
+   * image can never be dragged off the frame it fills. */
+  _applyStageZoom() {
+    if (!this._zoomEl || !this._stageEl) return;
+    const s = this._zoomScale;
+    const r = this._stageEl.getBoundingClientRect();
+    // Scaling from the centre makes the layer overhang by half the extra
+    // size on each side — that overhang is exactly how far it may travel
+    // before the black behind it would show.
+    const maxX = ((s - 1) * r.width) / 2;
+    const maxY = ((s - 1) * r.height) / 2;
+    this._zoomX = Math.min(maxX, Math.max(-maxX, this._zoomX));
+    this._zoomY = Math.min(maxY, Math.max(-maxY, this._zoomY));
+    // Cleared rather than set to a 1x identity, so an untouched card carries
+    // no transform and nothing gets promoted to its own layer for nothing.
+    this._zoomEl.style.transform =
+      s === 1 ? "" : `translate(${this._zoomX}px, ${this._zoomY}px) scale(${s})`;
+    this._stageEl.classList.toggle("zoomed", s > 1);
+  }
+
+  /** Back to 1x — on a double-tap, and whenever the stage swaps source.
+   * Staying zoomed into a corner of the clip you just left is disorienting,
+   * and the magnified region rarely means anything on the next one. */
+  _resetStageZoom() {
+    this._zoomScale = 1;
+    this._zoomX = 0;
+    this._zoomY = 0;
+    this._applyStageZoom();
   }
 
   _teardownWebRtc() {
@@ -1155,6 +1343,11 @@ class FrigateTimelineCard extends HTMLElement {
         (doc.exitFullscreen || doc.webkitExitFullscreen)?.call(doc);
         return;
       }
+      // Fullscreen hands the image to the native player, which does its own
+      // zooming. Leaving our CSS transform on would mean two magnifications
+      // stacked — and on the paths that fullscreen the stage rather than the
+      // <video>, a pan we can no longer reach to undo.
+      this._resetStageZoom();
       // The actual <video> — clip mode has it directly on `this._videoEl`;
       // live mode needs the recursive shadow-DOM search since
       // `ha-camera-stream` never exposes one to us directly.
@@ -1448,8 +1641,9 @@ class FrigateTimelineCard extends HTMLElement {
     this._teardownWebRtc();
     this._teardownHls();
     if (!keepElement) {
-      this._stageEl.innerHTML = "";
+      this._zoomEl.innerHTML = "";
       this._streamEl = null;
+      this._resetStageZoom();
     }
 
     if (this._config.live_source === "frigate") {
@@ -1471,7 +1665,7 @@ class FrigateTimelineCard extends HTMLElement {
     player.muted = true; // starts muted so autoplay is allowed; the mute button toggles it
     player.controls = false;
     player.style.cssText = "display:block;width:100%;height:100%;";
-    this._stageEl.appendChild(player);
+    this._zoomEl.appendChild(player);
     this._streamEl = player;
     // ha-camera-stream is a wrapper (renders ha-hls-player/ha-web-rtc-player
     // internally, not a plain <video>) — it doesn't expose the play/pause
@@ -1525,7 +1719,7 @@ class FrigateTimelineCard extends HTMLElement {
     video.playsInline = true;
     video.controls = false;
     if (!reused) {
-      this._stageEl.appendChild(video);
+      this._zoomEl.appendChild(video);
       this._streamEl = video;
       this._bindVideoControls(video);
     }
@@ -2070,8 +2264,9 @@ class FrigateTimelineCard extends HTMLElement {
     this._liveToken = (this._liveToken || 0) + 1; // invalidate any in-flight _showLive()
     this._teardownWebRtc();
     this._teardownHls();
-    this._stageEl.innerHTML = "";
+    this._zoomEl.innerHTML = "";
     this._streamEl = null;
+    this._resetStageZoom();
 
     const video = document.createElement("video");
     video.autoplay = true;
@@ -2124,7 +2319,7 @@ class FrigateTimelineCard extends HTMLElement {
       { once: true }
     );
 
-    this._stageEl.appendChild(video);
+    this._zoomEl.appendChild(video);
     this._bindVideoControls(video);
 
     // The source is resolved asynchronously so it can go through Home
