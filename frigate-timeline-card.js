@@ -1079,6 +1079,12 @@ class FrigateTimelineCard extends HTMLElement {
       e.preventDefault();
       dragging = true;
       this._scrubbing = true;
+      // The filmstrip only covers the footage underneath; left running it
+      // keeps decoding, and with sound on you hear a moment you have
+      // already left. Frigate pauses its player for the same reason rather
+      // than merely hiding it. Whatever is paused here is replaced wholesale
+      // when the drag ends, so nothing needs resuming.
+      (this._videoEl || this._streamEl)?.pause?.();
       this._nowLineEl.classList.add("scrubbing");
       lastClientX = e.clientX ?? null;
       const frac = fracFromEvent(e);
@@ -2504,6 +2510,11 @@ class FrigateTimelineCard extends HTMLElement {
     });
     video.addEventListener("ended", () => {
       if (this._playingClip !== clip) return;
+      // A clip running out mid-drag must not roll on to the next one: that
+      // path rebuilds the player, which is the element churn a drag exists
+      // to avoid, and it would fight the moment being dragged to. The
+      // release loads whatever was actually chosen.
+      if (this._scrubbing) return;
       // A clip that ended without ever really playing means the range came
       // back empty; continuing from it would spin through the day at speed.
       if (!(video.currentTime > 1)) return;
