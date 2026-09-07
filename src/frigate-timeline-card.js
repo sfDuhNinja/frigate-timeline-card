@@ -949,6 +949,29 @@ class FrigateTimelineCard extends HTMLElement {
     this._seekPreview(this._previewEl, Math.max(0, tsMs / 1000 - seg.start));
   }
 
+  /** Whether a moment has recorded footage behind it, according to the day's
+   * recording segments the card already holds.
+   *
+   * These cameras record on detection, so the quiet stretches genuinely have
+   * nothing to fetch, and asking anyway answered 404 — dozens of them across
+   * a single drag, filling the browser console with red. The answer was
+   * already in hand.
+   *
+   * Two cases still say yes without proof: no segments loaded, and a moment
+   * past the newest one known. Both mean the card's picture of the day is
+   * incomplete rather than empty, and a request is the only way to settle
+   * it — the live edge in particular runs ahead of the last fetch. */
+  _isRecordedAt(tsMs) {
+    const recs = this._recordings;
+    if (!recs?.length) return true;
+    let newest = 0;
+    for (const r of recs) {
+      if (tsMs >= r.start && tsMs <= r.end) return true;
+      if (r.end > newest) newest = r.end;
+    }
+    return tsMs > newest;
+  }
+
   /** Stands in for the filmstrip with the newest still frame at or before
    * the moment under the finger. An <img> needs no media decoder at all,
    * which is the resource this entire line of work exists to protect. */
@@ -972,6 +995,9 @@ class FrigateTimelineCard extends HTMLElement {
       this._snapWantSec = sec;
       return;
     }
+    // Nothing recorded here means nothing to fetch. Leave the picture where
+    // it is, silently — the last still, or the paused footage beneath it.
+    if (!this._isRecordedAt(tsMs)) return;
     this._snapInFlight = true;
     this._snapWantSec = null;
     const url =
