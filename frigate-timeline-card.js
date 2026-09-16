@@ -1127,17 +1127,24 @@ class FrigateTimelineCard extends HTMLElement {
     return ts >= Date.now() - toleranceMs;
   }
 
+  /** Clamped 0-1 position of a client X coordinate along the track. */
+  _fracFromClientX(x) {
+    const rect = this._trackEl.getBoundingClientRect();
+    if (!rect.width || x == null) return null;
+    return Math.min(1, Math.max(0, (x - rect.left) / rect.width));
+  }
+
+  /** Timestamp at a given 0-1 fraction of a window. */
+  _msAtFrac(win, frac) {
+    return win.start + frac * (win.end - win.start);
+  }
+
   _wireNowLineScrub() {
     if (!this._nowLineEl) return;
     let dragging = false;
     let lastTs = null;
 
-    const fracFromClientX = (x) => {
-      const rect = this._trackEl.getBoundingClientRect();
-      if (!rect.width || x == null) return null;
-      return Math.min(1, Math.max(0, (x - rect.left) / rect.width));
-    };
-    const fracFromEvent = (e) => fracFromClientX(e.clientX ?? e.touches?.[0]?.clientX);
+    const fracFromEvent = (e) => this._fracFromClientX(e.clientX ?? e.touches?.[0]?.clientX);
 
     // Dragging the selector to either end scrolls the window that way, so
     // a zoomed-in strip can be scrubbed past its own edges instead of
@@ -1179,7 +1186,7 @@ class FrigateTimelineCard extends HTMLElement {
           this._scheduleRender();
           // The window moved under a stationary finger, so the same point
           // on screen is a different moment now.
-          const frac = fracFromClientX(lastClientX);
+          const frac = this._fracFromClientX(lastClientX);
           if (frac != null) trackSeekTarget(previewAt(frac));
         }
       }
@@ -1192,7 +1199,7 @@ class FrigateTimelineCard extends HTMLElement {
       // at the end of the drag is pulled onto real footage, the same way a
       // tap is. Constraining the preview itself would make the line stick
       // and jump under the finger.
-      const ts = win.start + frac * (win.end - win.start);
+      const ts = this._msAtFrac(win, frac);
       const pct = frac * 100;
       this._nowLineEl.style.display = "";
       this._nowPillEl.style.display = "";
@@ -1293,13 +1300,7 @@ class FrigateTimelineCard extends HTMLElement {
     let panned = false;
     let startX = 0;
     let startCenterMs = 0;
-    const fracFromEvent = (e) => {
-      const rect = this._trackEl.getBoundingClientRect();
-      if (!rect.width) return null;
-      const x = e.clientX ?? e.touches?.[0]?.clientX;
-      if (x == null) return null;
-      return Math.min(1, Math.max(0, (x - rect.left) / rect.width));
-    };
+    const fracFromEvent = (e) => this._fracFromClientX(e.clientX ?? e.touches?.[0]?.clientX);
     const showScrub = (frac) => {
       let el = this._trackEl.querySelector(".ftc-scrub");
       if (!el) {
@@ -1374,11 +1375,10 @@ class FrigateTimelineCard extends HTMLElement {
       "wheel",
       (e) => {
         e.preventDefault();
-        const rect = this._trackEl.getBoundingClientRect();
-        if (!rect.width) return;
-        const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+        const frac = this._fracFromClientX(e.clientX);
+        if (frac == null) return;
         const win = this._currentWindow();
-        const atMs = win.start + frac * (win.end - win.start);
+        const atMs = this._msAtFrac(win, frac);
         const factor = e.deltaY < 0 ? 1 / 1.4 : 1.4; // scroll up = zoom in
         this._applyZoom((this._windowHours || 24) * factor, atMs);
       },
@@ -1401,11 +1401,10 @@ class FrigateTimelineCard extends HTMLElement {
           clearScrub();
           pinchStartDist = touchDist(e.touches);
           pinchStartHours = this._windowHours || 24;
-          const rect = this._trackEl.getBoundingClientRect();
           const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-          const frac = Math.min(1, Math.max(0, (midX - rect.left) / rect.width));
+          const frac = this._fracFromClientX(midX) ?? 0;
           const win = this._currentWindow();
-          pinchCenterMs = win.start + frac * (win.end - win.start);
+          pinchCenterMs = this._msAtFrac(win, frac);
         }
       },
       { passive: false }
@@ -2839,8 +2838,7 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   _seekTo(frac) {
-    const win = this._currentWindow();
-    const raw = win.start + frac * (win.end - win.start);
+    const raw = this._msAtFrac(this._currentWindow(), frac);
     this._playAt(this._nearestPlayableMs(raw));
   }
 
