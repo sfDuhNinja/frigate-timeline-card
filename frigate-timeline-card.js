@@ -88,6 +88,12 @@ const PLAYHEAD_TICK_MS = 60 * 1000;
 const WATCHDOG_MS = 5000;
 /** Data still arriving but the playhead frozen this long — reconnect. */
 const STALL_RECONNECT_MS = 10000;
+/** Consecutive decode failures on "main" (wedge, lag, or a decode error —
+ * never a plain network drop) before falling back to "sub" for the rest of
+ * the live session. Catches a camera whose codec exceeds the client's
+ * decoder capacity (typically HEVC on Safari/iOS/macOS with several
+ * "main" streams open) without ever guessing at that in advance. */
+const LIVE_WEDGE_DOWNGRADE_THRESHOLD = 3;
 /** Playhead this far behind the live edge is unrecoverable — reconnect. */
 const MAX_LIVE_LAG_SEC = 60;
 /** Minimum spacing between live-edge catch-up passes. */
@@ -1882,6 +1888,13 @@ class FrigateTimelineCard extends HTMLElement {
    * `main` starts to earn its keep.
    */
   _resolveStreamSuffix() {
+    // Overrides even an explicit `frigate_stream: main` — that setting is
+    // "give me the best you've got", and this camera has just spent
+    // LIVE_WEDGE_DOWNGRADE_THRESHOLD attempts in a row proving it can't
+    // deliver that right now. Cleared on the next explicit Live press
+    // (`_showLive({ resetView: true })`), which is the user asking to try
+    // again, not on every reconnect.
+    if (this._forceSubUntilLive) return "sub";
     const configured = this._config.frigate_stream || "auto";
     if (configured !== "auto") return configured;
     // Decided by what the device is, not by how big the card happens to be
@@ -2071,6 +2084,11 @@ class FrigateTimelineCard extends HTMLElement {
       this._updateDayNavState();
       this._ensureData();
       this._ensureRecordings();
+      // An explicit Live press is the user asking to try "main" again —
+      // give a wedged camera a fresh run at the resolution it's configured
+      // for instead of leaving it downgraded for the rest of the session.
+      this._liveWedgeCount = 0;
+      this._forceSubUntilLive = false;
     }
     const token = (this._liveToken = (this._liveToken || 0) + 1);
     this._teardownWebRtc();
@@ -2242,6 +2260,11 @@ class FrigateTimelineCard extends HTMLElement {
         // below) — set there, read by onUnmuteNeedsAudio to know whether an
         // unmute actually needs a reconnect.
         let requestedVideoOnly = false;
+        // Set by onMediaError (decode errors only) and the watchdog (wedge
+        // or lag) — the failure classes that mean the decoder couldn't keep
+        // up, as opposed to a plain network drop. Read once in onclose to
+        // update the session's wedge count.
+        let decodeFailureThisAttempt = false;
 
         const pump = () => {
           if (cancelled || token !== this._liveToken) return;
@@ -2386,6 +2409,9 @@ class FrigateTimelineCard extends HTMLElement {
           if (code !== 3 /* MEDIA_ERR_DECODE */ && code !== 2 /* MEDIA_ERR_NETWORK */) return;
           if (cancelled || token !== this._liveToken) return;
           console.warn("[frigate-timeline-card] live <video> error — reconnecting", video.error);
+          // Only a decode error says the decoder itself is the problem — a
+          // network error is unrelated to whether "main" fits the hardware.
+          if (code === 3) decodeFailureThisAttempt = true;
           teardownAttempt();
           try {
             ws.close(4001);
@@ -2469,6 +2495,7 @@ class FrigateTimelineCard extends HTMLElement {
             stalledMs,
             lagSec: Number((end - currentTime).toFixed(1)),
           });
+          decodeFailureThisAttempt = true;
           teardownAttempt();
           try {
             ws.close(4002);
@@ -2633,6 +2660,23 @@ class FrigateTimelineCard extends HTMLElement {
           // day burns its five attempts on five unrelated blips hours apart
           // and then stays black until someone reloads.
           const healthy = gotData && openedAt && Date.now() - openedAt > 30000;
+          // A run healthy enough to count as its own incident also clears
+          // whatever this camera owed from a previous bad streak — it's
+          // proven it can hold "main" again. Otherwise, a decode failure
+          // (never a plain network drop) adds to the streak, and enough of
+          // them in a row means this resolution isn't landing right now.
+          if (healthy) {
+            this._liveWedgeCount = 0;
+          } else if (decodeFailureThisAttempt) {
+            this._liveWedgeCount = (this._liveWedgeCount || 0) + 1;
+            if (this._liveWedgeCount >= LIVE_WEDGE_DOWNGRADE_THRESHOLD && !this._forceSubUntilLive) {
+              this._forceSubUntilLive = true;
+              console.warn(
+                "[frigate-timeline-card] live keeps failing on this resolution — falling back to sub until Live is pressed again",
+                { wedgeCount: this._liveWedgeCount }
+              );
+            }
+          }
           const next = healthy ? 0 : attempt + 1;
           if (healthy || attempt < MAX_ATTEMPTS) {
             // A connection that had already started delivering data and
