@@ -80,6 +80,7 @@
  *   live_source: ha                         # optional — "ha" (default, via ha-camera-stream) or "frigate" (go2rtc MSE through HA's Frigate proxy, bypassing HA's WebRTC bridge)
  *   go2rtc_url: http://192.168.1.11:1984    # optional — only used when live_source: frigate; forces a direct connection to a go2rtc that isn't the one Frigate bundles (skips HA's proxy, so mixed-content/reachability caveats come back)
  *   frigate_stream: auto                    # optional — only used when live_source: frigate; "auto" (default — full stream on a desktop, sub stream on phones and tablets), "main" or "sub"
+ *   frigate_stream_compat: false            # optional — only used when live_source: frigate and the resolved stream is "main"; requests "<camera>_main_compat" instead of "<camera>_main". For a camera whose main stream is HEVC, when a go2rtc stream by that name exists (a transcoded H.264 copy — Safari/iOS/macOS in particular have very few concurrent HEVC hardware decode slots, and fall over decoding more than one or two "main" streams at once)
  */
 
 const PLAYHEAD_TICK_MS = 60 * 1000;
@@ -297,7 +298,7 @@ class FrigateTimelineCard extends HTMLElement {
     if (config.live_source !== "frigate" && !config.camera_entity) {
       throw new Error("frigate-timeline-card: 'camera_entity' is required (for live view via ha-camera-stream)");
     }
-    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "auto", show_motion: true, pause_offscreen: true, ...config };
+    this._config = { height: 44, frigate_instance_id: "frigate", default_zoom_hours: 10, auto_hide_seconds: 0, live_source: "ha", frigate_stream: "auto", frigate_stream_compat: false, show_motion: true, pause_offscreen: true, ...config };
     this._dayKey = todayKey();
     this._segments = [];
     this._events = [];
@@ -1945,7 +1946,16 @@ class FrigateTimelineCard extends HTMLElement {
     // fullscreen state that just changed actually moved the answer, rather
     // than reconnecting on every toggle regardless.
     this._liveStreamSuffix = suffix;
-    return `${this._config.frigate_camera}_${suffix}`;
+    // An opt-in escape hatch for a camera whose native "main" codec exceeds
+    // the client's hardware decoder capacity when several are open at once
+    // — Safari/iOS/macOS in particular often have only one or two
+    // concurrent HEVC decode slots. Points at a second go2rtc stream named
+    // "<camera>_main_compat", which the user's own go2rtc config transcodes
+    // (commonly via hardware — VAAPI/QSV) to H.264. Only applies to
+    // "main"; "sub" streams are usually already lightweight enough not to
+    // need it.
+    const compatSuffix = suffix === "main" && this._config.frigate_stream_compat ? "_compat" : "";
+    return `${this._config.frigate_camera}_${suffix}${compatSuffix}`;
   }
 
   /** Base path of the Frigate HA integration's own reverse proxy. Every
