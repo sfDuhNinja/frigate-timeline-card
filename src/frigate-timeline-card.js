@@ -2375,10 +2375,7 @@ class FrigateTimelineCard extends HTMLElement {
             clearInterval(watchdog);
             watchdog = null;
           }
-          video.removeEventListener("error", onMediaError);
-          video.removeEventListener("volumechange", onUnmuteNeedsAudio);
-          video.removeEventListener("webkitbeginfullscreen", onFullscreenToggle);
-          video.removeEventListener("webkitendfullscreen", onFullscreenToggle);
+          videoListeners.forEach(([evt, fn]) => video.removeEventListener(evt, fn));
           try {
             sourceBuffer?.removeEventListener("updateend", pump);
             sourceBuffer?.removeEventListener("updateend", catchUpToLiveEdge);
@@ -2414,7 +2411,6 @@ class FrigateTimelineCard extends HTMLElement {
             /* already closing — onclose still runs */
           }
         };
-        video.addEventListener("error", onMediaError);
 
         // The one moment `requestedVideoOnly` needs to change mid-attempt:
         // the user unmutes a stream that was opened without an audio track
@@ -2431,7 +2427,6 @@ class FrigateTimelineCard extends HTMLElement {
             /* already closing — onclose still runs */
           }
         };
-        video.addEventListener("volumechange", onUnmuteNeedsAudio);
 
         // iOS's video-only fullscreen (`webkitEnterFullscreen`, used by the
         // control bar's fullscreen button on iPhone/iPad Safari — see
@@ -2440,8 +2435,14 @@ class FrigateTimelineCard extends HTMLElement {
         // document-level listener `_handleFullscreenChange` is otherwise
         // wired to. These two are the only way to notice it happened at all.
         const onFullscreenToggle = () => this._handleFullscreenChange();
-        video.addEventListener("webkitbeginfullscreen", onFullscreenToggle);
-        video.addEventListener("webkitendfullscreen", onFullscreenToggle);
+
+        const videoListeners = [
+          ["error", onMediaError],
+          ["volumechange", onUnmuteNeedsAudio],
+          ["webkitbeginfullscreen", onFullscreenToggle],
+          ["webkitendfullscreen", onFullscreenToggle],
+        ];
+        videoListeners.forEach(([evt, fn]) => video.addEventListener(evt, fn));
 
         // Watchdog for the failure mode neither of the handlers above can
         // see: playback wedges while nothing reports a thing. Captured on a
