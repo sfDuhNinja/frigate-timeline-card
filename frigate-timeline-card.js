@@ -251,6 +251,7 @@ class FrigateTimelineCard extends HTMLElement {
     this._onVisibilityChange = () => this._updateLiveActivity();
     this._onWindowPointerMove = (e) => this._windowDragMove?.(e);
     this._onWindowPointerUp = () => this._windowDragStop?.();
+    this._onFullscreenChange = () => this._handleFullscreenChange();
   }
 
   _t(key) {
@@ -375,6 +376,8 @@ class FrigateTimelineCard extends HTMLElement {
     // rebuild — so the clock reads live seconds like the reference UI.
     this._clockInterval = setInterval(() => this._updateNowPill(), 1000);
     document.addEventListener("visibilitychange", this._onVisibilityChange);
+    document.addEventListener("fullscreenchange", this._onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", this._onFullscreenChange);
     // Scrolled out of sight is as good a reason to stop decoding as the
     // app being in the background. On a phone only one of these cards fits
     // on screen at a time, so without this a three-camera view decodes
@@ -423,6 +426,8 @@ class FrigateTimelineCard extends HTMLElement {
       this._clockInterval = null;
     }
     document.removeEventListener("visibilitychange", this._onVisibilityChange);
+    document.removeEventListener("fullscreenchange", this._onFullscreenChange);
+    document.removeEventListener("webkitfullscreenchange", this._onFullscreenChange);
     this._viewObserver?.disconnect();
     this._viewObserver = null;
     if (this._suspendTimer) {
@@ -1886,10 +1891,41 @@ class FrigateTimelineCard extends HTMLElement {
     // the sub stream, which is the case this was ever protecting: on the
     // dashboard it was measured against, that is 54 Mpx/s against 510.
     //
-    // The trade is a tablet in fullscreen, which stays at 720p rather than
-    // reconnecting for more. `frigate_stream: main` covers that if it
-    // matters more than the battery does.
-    return this._isDesktopClass() ? "main" : "sub";
+    // A phone/tablet is the one case where that's the wrong trade the
+    // moment the picture actually fills the screen: fullscreen there is
+    // exactly one camera, with the same decode headroom a desktop grid
+    // tile never has. `_handleFullscreenChange()` reconnects at this
+    // resolved value whenever fullscreen state flips, so this only needs to
+    // answer for right now.
+    if (this._isDesktopClass() || this._isFullscreenActive()) return "main";
+    return "sub";
+  }
+
+  /** Whether *this card's* live view is the thing currently fullscreen —
+   * not just whether something on the page is. Covers both the standard
+   * Fullscreen API (desktop, Android) and iOS's video-only fullscreen,
+   * which sets neither `document.fullscreenElement` nor its WebKit-prefixed
+   * equivalent. */
+  _isFullscreenActive() {
+    const el = document.fullscreenElement || document.webkitFullscreenElement;
+    if (el && this.contains(el)) return true;
+    const v = this._streamEl;
+    return !!(v && v.tagName === "VIDEO" && v.webkitDisplayingFullscreen);
+  }
+
+  /** Re-evaluates the live resolution whenever this card's fullscreen state
+   * changes, and reconnects if the answer actually moved. Only `frigate`
+   * live views with `frigate_stream: auto` have anything to re-evaluate —
+   * `ha-camera-stream` picks its own stream, and an explicit `main`/`sub`
+   * never changes. A recorded clip in fullscreen isn't this decision at
+   * all. `_showLiveViaGo2rtc` reuses the existing `<video>` for a
+   * same-element reconnect, so this never drops out of fullscreen doing
+   * it. */
+  _handleFullscreenChange() {
+    if (this._config.live_source !== "frigate" || (this._config.frigate_stream || "auto") !== "auto") return;
+    if (this._pillMode !== "live") return;
+    if (this._resolveStreamSuffix() === this._liveStreamSuffix) return;
+    this._showLive();
   }
 
   /** A mouse and a screen this wide means a computer, not a phone held in
@@ -1905,6 +1941,10 @@ class FrigateTimelineCard extends HTMLElement {
 
   _go2rtcStreamName() {
     const suffix = this._resolveStreamSuffix();
+    // Remembered so `_handleFullscreenChange()` can tell whether the
+    // fullscreen state that just changed actually moved the answer, rather
+    // than reconnecting on every toggle regardless.
+    this._liveStreamSuffix = suffix;
     return `${this._config.frigate_camera}_${suffix}`;
   }
 
@@ -2188,6 +2228,10 @@ class FrigateTimelineCard extends HTMLElement {
         // Set only for failures no reconnect can fix (an unsupported codec
         // is the same on the next attempt). Everything else retries.
         let fatal = false;
+        // Whether this attempt asked go2rtc for video only (see ws.onopen
+        // below) — set there, read by onUnmuteNeedsAudio to know whether an
+        // unmute actually needs a reconnect.
+        let requestedVideoOnly = false;
 
         const pump = () => {
           if (cancelled || token !== this._liveToken) return;
@@ -2304,6 +2348,9 @@ class FrigateTimelineCard extends HTMLElement {
             watchdog = null;
           }
           video.removeEventListener("error", onMediaError);
+          video.removeEventListener("volumechange", onUnmuteNeedsAudio);
+          video.removeEventListener("webkitbeginfullscreen", onFullscreenToggle);
+          video.removeEventListener("webkitendfullscreen", onFullscreenToggle);
           try {
             sourceBuffer?.removeEventListener("updateend", pump);
             sourceBuffer?.removeEventListener("updateend", catchUpToLiveEdge);
@@ -2337,6 +2384,33 @@ class FrigateTimelineCard extends HTMLElement {
           }
         };
         video.addEventListener("error", onMediaError);
+
+        // The one moment `requestedVideoOnly` needs to change mid-attempt:
+        // the user unmutes a stream that was opened without an audio track
+        // to begin with. Nothing else does — muting back doesn't need an
+        // audio track dropped urgently, so that side is left for the next
+        // natural reconnect rather than spending one on it.
+        const onUnmuteNeedsAudio = () => {
+          if (cancelled || token !== this._liveToken) return;
+          if (video.muted || !requestedVideoOnly || this._muteToPlay) return;
+          teardownAttempt();
+          try {
+            ws.close(4003);
+          } catch (_) {
+            /* already closing — onclose still runs */
+          }
+        };
+        video.addEventListener("volumechange", onUnmuteNeedsAudio);
+
+        // iOS's video-only fullscreen (`webkitEnterFullscreen`, used by the
+        // control bar's fullscreen button on iPhone/iPad Safari — see
+        // `_bindVideoControls`) never sets `document.fullscreenElement` and
+        // fires no `fullscreenchange` event, so it's invisible to the
+        // document-level listener `_handleFullscreenChange` is otherwise
+        // wired to. These two are the only way to notice it happened at all.
+        const onFullscreenToggle = () => this._handleFullscreenChange();
+        video.addEventListener("webkitbeginfullscreen", onFullscreenToggle);
+        video.addEventListener("webkitendfullscreen", onFullscreenToggle);
 
         // Watchdog for the failure mode neither of the handlers above can
         // see: playback wedges while nothing reports a thing. Captured on a
@@ -2407,10 +2481,21 @@ class FrigateTimelineCard extends HTMLElement {
           // addSourceBuffer() threw for every camera whose audio track
           // isn't already AAC/Opus. AAC (mp4a.40.*) and Opus alone are
           // reliably supported and cover effectively all real cameras.
+          //
+          // Live starts muted (see below), and stays that way on every card
+          // that isn't the one the user actually tapped unmute on. Asking
+          // go2rtc for an audio track we're only going to throw away is a
+          // full extra decode pipeline per camera for nothing — dropped
+          // whenever the element is muted at connect time, the same way
+          // `_muteToPlay` already drops it after a codec rejection.
+          // `onUnmuteNeedsAudio` below reconnects the one time this actually
+          // needs to change: the user unmutes a stream that was opened
+          // without an audio track.
+          requestedVideoOnly = this._muteToPlay || video.muted;
           ws.send(
             JSON.stringify({
               type: "mse",
-              value: this._muteToPlay ? MSE_CODECS_VIDEO_ONLY : MSE_CODECS_WITH_AUDIO,
+              value: requestedVideoOnly ? MSE_CODECS_VIDEO_ONLY : MSE_CODECS_WITH_AUDIO,
             })
           );
         };
@@ -2545,7 +2630,11 @@ class FrigateTimelineCard extends HTMLElement {
             // one that never got going at all (the early-teardown race —
             // retry fast, the next attempt usually just works).
             const delayMs = gotData ? Math.min(1000 * 2 ** attempt, 8000) : 300 * (attempt + 1);
-            setTimeout(() => connect(next), delayMs);
+            // Jittered ±25%: several cards wedged by the same system-wide
+            // decode overload would otherwise reconnect in the same instant
+            // and recreate exactly the spike that wedged them.
+            const jitteredDelayMs = delayMs * (0.75 + Math.random() * 0.5);
+            setTimeout(() => connect(next), jitteredDelayMs);
           } else {
             this._showStageError(this._t("liveFrigateError"));
           }
