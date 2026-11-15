@@ -90,3 +90,22 @@ Most Frigate/camera Lovelace cards bundle a full media gallery, thumbnails, PTZ,
 ## License
 
 MIT
+
+## All cameras: `frigate-cameras-card`
+
+The same file also registers `custom:frigate-cameras-card`: every camera as a still, the way Frigate's own live page opens. Tapping one replaces the grid with a full `frigate-timeline-card` for that camera and a back button. Only stills are loaded until a camera is picked, refreshed every `refresh_seconds` (default 10) and not at all while the card is off screen.
+
+```yaml
+type: custom:frigate-cameras-card
+frigate_url: http://192.168.1.11:5000
+live_source: frigate
+orientation: vertical
+cameras:
+  - camera: spate                 # Frigate camera name
+    entity: camera.camera_spate   # HA camera entity the still comes from
+    name: Spate                   # optional label
+  - camera: garaj
+    entity: camera.camera_garaj
+```
+
+Every key other than `cameras` and `refresh_seconds` is passed to the timeline card a camera opens in.

@@ -3817,11 +3817,148 @@ class FrigateTimelineCardEditor extends HTMLElement {
   }
 }
 
+/**
+ * Every camera as a still, the way Frigate's own live dashboard opens; tap
+ * one and it becomes a full frigate-timeline-card for that camera, with a
+ * back button to return. Stills only, never a stream, until a camera is
+ * picked — the overview costs one small JPEG per camera every
+ * `refresh_seconds`, and nothing at all while it is off screen.
+ *
+ *   type: custom:frigate-cameras-card
+ *   refresh_seconds: 10                 # optional — how often the stills reload (default 10)
+ *   cameras:
+ *     - camera: spate                   # Frigate camera name
+ *       entity: camera.camera_spate     # HA camera entity the still comes from
+ *       name: Spate                     # optional label
+ *   # every other key (frigate_url, live_source, orientation, …) is passed
+ *   # through to the frigate-timeline-card the tapped camera opens in.
+ */
+class FrigateCamerasCard extends HTMLElement {
+  setConfig(config) {
+    if (!Array.isArray(config.cameras) || !config.cameras.length) {
+      throw new Error("frigate-cameras-card: 'cameras' is required");
+    }
+    for (const c of config.cameras) {
+      if (!c?.camera || !c?.entity) throw new Error("frigate-cameras-card: each camera needs 'camera' and 'entity'");
+    }
+    this._config = config;
+    this._showGrid();
+  }
+
+  set hass(hass) {
+    const first = !this._hass;
+    this._hass = hass;
+    if (this._timeline) this._timeline.hass = hass;
+    else if (first) this._refreshStills();
+  }
+
+  getCardSize() {
+    return 3 * this._config.cameras.length;
+  }
+
+  getGridOptions() {
+    return { columns: "full" };
+  }
+
+  connectedCallback() {
+    this._timer = setInterval(() => this._refreshStills(), (Number(this._config?.refresh_seconds) || 10) * 1000);
+    this._observer = new IntersectionObserver((entries) => {
+      this._onScreen = entries.some((e) => e.isIntersecting);
+      if (this._onScreen) this._refreshStills();
+    });
+    this._observer.observe(this);
+  }
+
+  disconnectedCallback() {
+    clearInterval(this._timer);
+    this._observer?.disconnect();
+  }
+
+  _showGrid() {
+    this._timeline = null; // removing it from the DOM is what stops its stream
+    this.innerHTML = `
+      <div class="fcc-grid">
+        ${this._config.cameras
+          .map(
+            (c, i) => `<button class="fcc-cam" data-i="${i}">
+              <img alt="">
+              ${c.name ? `<span class="fcc-name"></span>` : ""}
+            </button>`
+          )
+          .join("")}
+      </div>
+      <style>
+        frigate-cameras-card .fcc-grid {
+          display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        }
+        frigate-cameras-card .fcc-cam {
+          position: relative; display: block; width: 100%; padding: 0; border: none; cursor: pointer;
+          aspect-ratio: 16 / 9; background: #000; overflow: hidden;
+          border-radius: var(--ha-card-border-radius, 12px);
+        }
+        frigate-cameras-card .fcc-cam img {
+          width: 100%; height: 100%; object-fit: cover; display: block;
+        }
+        frigate-cameras-card .fcc-name {
+          position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 10px;
+          background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 12px;
+        }
+        frigate-cameras-card .fcc-back {
+          display: flex; align-items: center; gap: 4px; margin: 0 0 6px; padding: 4px 8px 4px 2px;
+          background: none; border: none; color: var(--primary-text-color, #fff);
+          font-size: 15px; cursor: pointer;
+        }
+        frigate-cameras-card .fcc-back span { font-size: 22px; line-height: 1; }
+      </style>
+    `;
+    this.querySelectorAll(".fcc-cam").forEach((btn) => {
+      const cam = this._config.cameras[Number(btn.dataset.i)];
+      const label = btn.querySelector(".fcc-name");
+      if (label) label.textContent = cam.name;
+      btn.addEventListener("click", () => this._open(cam));
+    });
+    this._refreshStills();
+  }
+
+  _refreshStills() {
+    if (!this._hass || this._timeline || this._onScreen === false || document.hidden) return;
+    this.querySelectorAll(".fcc-cam").forEach((btn) => {
+      const cam = this._config.cameras[Number(btn.dataset.i)];
+      const pic = this._hass.states[cam.entity]?.attributes?.entity_picture;
+      if (!pic) return;
+      // entity_picture carries the access token; width keeps it a thumbnail.
+      const width = Math.min(1280, Math.round(btn.clientWidth * Math.min(window.devicePixelRatio || 1, 2)) || 640);
+      btn.querySelector("img").src = this._hass.hassUrl(`${pic}&width=${width}&t=${Date.now()}`);
+    });
+  }
+
+  _open(cam) {
+    const { type, cameras, refresh_seconds, ...shared } = this._config;
+    const card = document.createElement("frigate-timeline-card");
+    card.setConfig({ ...shared, frigate_camera: cam.camera, camera_entity: cam.entity });
+    if (this._hass) card.hass = this._hass;
+    const back = document.createElement("button");
+    back.className = "fcc-back";
+    back.innerHTML = "<span>‹</span>";
+    back.append(cam.name || cam.camera);
+    back.addEventListener("click", () => this._showGrid());
+    const style = this.querySelector("style");
+    this.replaceChildren(back, card, style);
+    this._timeline = card;
+  }
+}
+
 customElements.define("frigate-timeline-card", FrigateTimelineCard);
+customElements.define("frigate-cameras-card", FrigateCamerasCard);
 customElements.define("frigate-timeline-card-editor", FrigateTimelineCardEditor);
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "frigate-timeline-card",
   name: "Frigate Timeline Card",
   description: "Live camera view + a Frigate-style horizontal event timeline below it.",
+});
+window.customCards.push({
+  type: "frigate-cameras-card",
+  name: "Frigate Cameras Card",
+  description: "All cameras as stills; tap one to open its live view and timeline.",
 });
