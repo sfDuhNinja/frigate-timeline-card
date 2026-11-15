@@ -93,7 +93,7 @@ MIT
 
 ## All cameras: `frigate-cameras-card`
 
-The same file also registers `custom:frigate-cameras-card`: every camera as a still, the way Frigate's own live page opens. Tapping one replaces the grid with a full `frigate-timeline-card` for that camera and a back button. Only stills are loaded until a camera is picked, refreshed every `refresh_seconds` (default 10) and not at all while the card is off screen.
+The same file also registers `custom:frigate-cameras-card`: every camera as a still, the way Frigate's own live page opens. Tapping one replaces the grid with a full `frigate-timeline-card` for that camera and a back button. One camera per row on a phone, two on anything 600px wide and up. Only stills are loaded until a camera is picked, refreshed every `refresh_seconds` (default 10) and not at all while the card is off screen.
 
 ```yaml
 type: custom:frigate-cameras-card

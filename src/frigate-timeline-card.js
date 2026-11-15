@@ -3889,7 +3889,11 @@ class FrigateCamerasCard extends HTMLElement {
       </div>
       <style>
         frigate-cameras-card .fcc-grid {
-          display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+          display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr);
+        }
+        /* One per row on a phone, two from tablet width up. */
+        @media (min-width: 600px) {
+          frigate-cameras-card .fcc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         frigate-cameras-card .fcc-cam {
           position: relative; display: block; width: 100%; padding: 0; border: none; cursor: pointer;
