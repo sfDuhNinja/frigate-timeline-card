@@ -3989,6 +3989,7 @@ class FrigateCamerasCard extends HTMLElement {
     clearInterval(this._timer);
     this._observer?.disconnect();
     window.removeEventListener("ll-custom", this._onBack);
+    setCamerasOpen(false);
   }
 
   /** A view's back/home button can target this card with
@@ -4007,6 +4008,7 @@ class FrigateCamerasCard extends HTMLElement {
   }
 
   _showGrid() {
+    setCamerasOpen(false);
     this._clearTileTimers();
     this._timeline = null; // removing it from the DOM is what stops its stream
     this.innerHTML = `
@@ -4148,10 +4150,61 @@ class FrigateCamerasCard extends HTMLElement {
     const style = this.querySelector("style");
     this.replaceChildren(back, card, style);
     this._timeline = card;
+    setCamerasOpen(true);
   }
 }
 
+/** Whether a frigate-cameras-card has a camera open, for the back button. */
+let camerasOpen = false;
+function setCamerasOpen(open) {
+  if (open === camerasOpen) return;
+  camerasOpen = open;
+  window.dispatchEvent(new Event("frigate-cameras-open-changed"));
+}
+
+/** A view footer/back button for frigate-cameras-card: a plain markdown card
+ * that reads `back_label` while a camera is open (tap → grid) and `label`
+ * otherwise (tap → `navigation_path`). */
+class FrigateCamerasBackCard extends HTMLElement {
+  setConfig(config) {
+    this._config = { label: "👈 Acasă", back_label: "👈 Înapoi", navigation_path: "/", ...config };
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._card) this._card.hass = hass;
+  }
+
+  connectedCallback() {
+    window.addEventListener("frigate-cameras-open-changed", this._render);
+    this.onclick = () =>
+      window.dispatchEvent(
+        new CustomEvent("ll-custom", { detail: { frigate_cameras_back: this._config.navigation_path } })
+      );
+    this.style.cursor = "pointer";
+    this._render();
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener("frigate-cameras-open-changed", this._render);
+  }
+
+  _render = async () => {
+    if (!this._config || !this.isConnected) return;
+    const content = camerasOpen ? this._config.back_label : this._config.label;
+    if (this._card) return this._card.setConfig({ type: "markdown", content });
+    const helpers = await window.loadCardHelpers?.();
+    if (!helpers || this._card) return;
+    this._card = helpers.createCardElement({ type: "markdown", content });
+    if (this._hass) this._card.hass = this._hass;
+    this.replaceChildren(this._card);
+    this._render(); // pick up a change made while the helpers loaded
+  };
+}
+
 customElements.define("frigate-timeline-card", FrigateTimelineCard);
+customElements.define("frigate-cameras-back-card", FrigateCamerasBackCard);
 customElements.define("frigate-cameras-card", FrigateCamerasCard);
 customElements.define("frigate-timeline-card-editor", FrigateTimelineCardEditor);
 window.customCards = window.customCards || [];

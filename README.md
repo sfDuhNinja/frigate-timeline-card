@@ -114,10 +114,15 @@ A red dot pulses while the camera sees motion (`binary_sensor.<camera>_motion`).
 
 Every key other than `cameras` and `refresh_seconds` is passed to the timeline card a camera opens in.
 
-A view's back/home button can go through the card instead of navigating straight away: with an open camera it returns to the grid, otherwise it goes to the given path.
+For a view footer, `custom:frigate-cameras-back-card` is a markdown button that reads `back_label` while a camera is open (tap returns to the grid) and `label` otherwise (tap goes to `navigation_path`):
 
 ```yaml
-tap_action:
-  action: fire-dom-event
-  frigate_cameras_back: /dashboard-home
+footer:
+  card:
+    type: custom:frigate-cameras-back-card
+    navigation_path: /dashboard-home
+    label: 👈 Home        # default "👈 Acasă"
+    back_label: 👈 Back   # default "👈 Înapoi"
 ```
+
+Any other button can do the same with `tap_action: {action: fire-dom-event, frigate_cameras_back: /dashboard-home}`.
