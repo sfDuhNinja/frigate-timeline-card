@@ -572,6 +572,11 @@ class FrigateTimelineCard extends HTMLElement {
     this._built = true;
     this._vertical = this._config.orientation === "vertical";
     this.classList.toggle("ftc-vertical", this._vertical);
+    // Just the live picture, for a frigate-cameras-card tile: no controls,
+    // no strip, and — with the strip counted as hidden — nothing fetched or
+    // rendered for it either.
+    this.classList.toggle("ftc-live-only", !!this._config.live_only);
+    if (this._config.live_only) this._timelineHidden = true;
     this.innerHTML = `
       <ha-card>
         <div class="ftc-stage"><div class="ftc-zoom"></div></div>
@@ -795,6 +800,12 @@ class FrigateTimelineCard extends HTMLElement {
           frigate-timeline-card.ftc-vertical .ftc-trackwrap { left: 64px; right: 10px; width: auto; bottom: 30px; }
           frigate-timeline-card.ftc-vertical .ftc-ticks { right: auto; width: 50px; bottom: 30px; }
         }
+        frigate-timeline-card.ftc-live-only .ftc-toolbar,
+        frigate-timeline-card.ftc-live-only .ftc-timeline { display: none; }
+        frigate-timeline-card.ftc-live-only ha-card { background: none; border: none; box-shadow: none; }
+        frigate-timeline-card.ftc-live-only .ftc-stage { border-radius: 0; background: transparent; }
+        /* Transparent until the first frame, so the still underneath stays up. */
+        frigate-timeline-card.ftc-live-only .ftc-zoom video { background: transparent; }
         frigate-timeline-card .ftc-stage-error {
           position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
           text-align: center; padding: 16px; color: #f2b632; font-size: 13px; line-height: 1.4;
@@ -987,6 +998,54 @@ class FrigateTimelineCard extends HTMLElement {
     }
   }
 
+  /** The still frames Frigate keeps for the hour in progress, before they
+   * are assembled into that hour's filmstrip — the same ones its own UI
+   * scrubs through there. Each is a small webp served straight from cache
+   * in ~50ms, where a recording snapshot is cut from the footage by ffmpeg
+   * on request and took ~700ms, which is what made the last hour choppy.
+   * Refetched at most every 10s, since the in-progress hour keeps growing. */
+  async _ensurePreviewFrames(base) {
+    if (this._dayKey !== todayKey() || this._framesLoading) return;
+    if (this._framesFetchedAt && Date.now() - this._framesFetchedAt < 10000) return;
+    this._framesLoading = true;
+    const now = Math.ceil(Date.now() / 1000);
+    try {
+      const res = await fetch(
+        `${base}/api/preview/${encodeURIComponent(this._cameraObjectId())}/start/${now - 3600}/end/${now}/frames`
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const list = await res.json();
+      this._previewFrames = (Array.isArray(list) ? list : [])
+        .map((name) => ({ name, sec: Number(String(name).match(/-(\d+(?:\.\d+)?)\.webp$/)?.[1]) }))
+        .filter((f) => Number.isFinite(f.sec))
+        .sort((a, b) => a.sec - b.sec);
+    } catch (err) {
+      console.debug("[frigate-timeline-card] preview frames unavailable", err);
+    } finally {
+      this._framesLoading = false;
+      this._framesFetchedAt = Date.now();
+    }
+  }
+
+  /** Newest in-progress preview frame at or before a moment, if one is
+   * close enough to stand for it. */
+  _previewFrameFor(tsMs) {
+    const frames = this._previewFrames;
+    if (!frames?.length || this._dayKey !== todayKey()) return null;
+    const sec = tsMs / 1000;
+    let lo = 0;
+    let hi = frames.length - 1;
+    if (sec < frames[0].sec) return null;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (frames[mid].sec <= sec) lo = mid;
+      else hi = mid - 1;
+    }
+    // Frigate writes one every few seconds while something moves and one
+    // every 30s or so otherwise; past a minute it is no longer this moment.
+    return sec - frames[lo].sec <= 60 ? frames[lo] : null;
+  }
+
   /** The segment covering a moment, or nothing. Frigate's own player makes
    * the same check before seeking and simply declines when it falls in a
    * gap — there is no filmstrip for a stretch that was never recorded. */
@@ -1012,6 +1071,7 @@ class FrigateTimelineCard extends HTMLElement {
     if (!seg) {
       // No filmstrip means the hour is still being lived through, so fall
       // back to the single frames Frigate has written so far.
+      this._ensurePreviewFrames(base);
       this._showScrubFrame(tsMs, base);
       return;
     }
@@ -1116,14 +1176,19 @@ class FrigateTimelineCard extends HTMLElement {
       this._snapWantSec = sec;
       return;
     }
+    const frame = this._previewFrameFor(tsMs);
     // Nothing recorded here means nothing to fetch. Leave the picture where
     // it is, silently — the last still, or the paused footage beneath it.
-    if (!this._isRecordedAt(tsMs)) return;
+    if (!frame && !this._isRecordedAt(tsMs)) return;
+    const url = frame
+      ? `${base}/api/preview/${encodeURIComponent(frame.name)}/thumbnail.webp`
+      : `${base}/api/${encodeURIComponent(this._cameraObjectId())}` +
+        `/recordings/${sec}/snapshot.jpg?height=${SCRUB_SNAPSHOT_HEIGHT}`;
+    // Many positions share a frame; asking for the one on screen again is
+    // a wasted round trip.
+    if (url === this._previewImgEl.getAttribute("src")) return;
     this._snapInFlight = true;
     this._snapWantSec = null;
-    const url =
-      `${base}/api/${encodeURIComponent(this._cameraObjectId())}` +
-      `/recordings/${sec}/snapshot.jpg?height=${SCRUB_SNAPSHOT_HEIGHT}`;
     // Loaded detached and only shown once it has actually arrived. These
     // cameras record on detection, so the quiet stretches between events
     // have no recording behind them and answer 404 — and assigning a failing
@@ -3077,6 +3142,7 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   async _ensureData() {
+    if (this._config.live_only) return; // a tile in frigate-cameras-card: picture only
     const base = this._config.frigate_url.replace(/\/+$/, "");
     const win = dayWindow(this._dayKey);
     // Nothing downstream can do anything useful with a broken day, and a
@@ -3835,6 +3901,7 @@ class FrigateTimelineCardEditor extends HTMLElement {
  *     - camera: spate                   # Frigate camera name
  *       entity: camera.camera_spate     # HA camera entity the still comes from
  *       name: Spate                     # optional label
+ *       tile_stream: sub                # optional — go2rtc stream suffix the tile goes live on while an object is detected (default "sub")
  *   # every other key (frigate_url, live_source, orientation, …) is passed
  *   # through to the frigate-timeline-card the tapped camera opens in.
  */
@@ -3864,6 +3931,9 @@ class FrigateCamerasCard extends HTMLElement {
     else {
       if (first) this._refreshStills();
       this._updateObjects();
+      this.querySelectorAll(".fcc-cam").forEach((btn) => {
+        if (btn._live) btn._live.hass = hass;
+      });
     }
   }
 
@@ -3890,6 +3960,7 @@ class FrigateCamerasCard extends HTMLElement {
       const labels = this._occupancyEntities(cam)
         .filter(([id]) => this._hass.states[id]?.state === "on")
         .map(([, label]) => label);
+      this._setTileLive(btn, cam, labels.length > 0);
       const key = labels.join(",");
       if (btn.dataset.objects === key) return;
       btn.dataset.objects = key;
@@ -3929,7 +4000,12 @@ class FrigateCamerasCard extends HTMLElement {
     this._observer?.disconnect();
   }
 
+  _clearTileTimers() {
+    this.querySelectorAll(".fcc-cam").forEach((btn) => clearTimeout(btn._liveOffTimer));
+  }
+
   _showGrid() {
+    this._clearTileTimers();
     this._timeline = null; // removing it from the DOM is what stops its stream
     this.innerHTML = `
       <div class="fcc-grid">
@@ -3959,17 +4035,20 @@ class FrigateCamerasCard extends HTMLElement {
         frigate-cameras-card .fcc-cam img {
           width: 100%; height: 100%; object-fit: cover; display: block;
         }
+        frigate-cameras-card .fcc-live {
+          position: absolute; inset: 0; pointer-events: none;
+        }
         frigate-cameras-card .fcc-objects {
-          position: absolute; top: 8px; left: 8px; display: flex; gap: 6px;
+          position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; z-index: 1;
         }
         frigate-cameras-card .fcc-objects span {
           display: flex; align-items: center; justify-content: center;
           width: 30px; height: 30px; border-radius: 50%;
-          background: rgba(140, 140, 160, 0.75); color: #fff;
+          background: rgba(0, 0, 0, 0.6); color: #fff;
           --mdc-icon-size: 18px;
         }
         frigate-cameras-card .fcc-name {
-          position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 10px;
+          z-index: 1; position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 10px;
           background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 12px;
         }
         frigate-cameras-card .fcc-back {
@@ -3990,9 +4069,48 @@ class FrigateCamerasCard extends HTMLElement {
     this._updateObjects();
   }
 
+  /**
+   * Live on a tile while Frigate is tracking something there, the way its
+   * own grid does — stills otherwise. Keyed on detected objects rather than
+   * raw motion: on these cameras motion is on most of the night (IR noise,
+   * insects), which would have every tile streaming permanently.
+   *
+   * The stream is the camera's light one (`tile_stream`, default "sub");
+   * opening the camera is what gets full resolution. It stays up for
+   * TILE_LIVE_GRACE_MS after the last object leaves, so an object stepping
+   * in and out of view doesn't rebuild the stream each time.
+   */
+  _setTileLive(btn, cam, active) {
+    if (active) {
+      clearTimeout(btn._liveOffTimer);
+      btn._liveOffTimer = null;
+      if (btn._live || this._onScreen === false) return;
+      const { type, cameras, refresh_seconds, ...shared } = this._config;
+      const live = document.createElement("frigate-timeline-card");
+      live.setConfig({
+        ...shared,
+        frigate_camera: cam.camera,
+        camera_entity: cam.entity,
+        frigate_stream: cam.tile_stream || "sub",
+        live_only: true,
+      });
+      live.className = "fcc-live";
+      live.hass = this._hass;
+      btn.querySelector("img").after(live);
+      btn._live = live;
+    } else if (btn._live && !btn._liveOffTimer) {
+      btn._liveOffTimer = setTimeout(() => {
+        btn._liveOffTimer = null;
+        btn._live?.remove(); // disconnecting it is what closes the stream
+        btn._live = null;
+      }, 10000);
+    }
+  }
+
   _refreshStills() {
     if (!this._hass || this._timeline || this._onScreen === false || document.hidden) return;
     this.querySelectorAll(".fcc-cam").forEach((btn) => {
+      if (btn._live) return; // the stream already covers it
       const cam = this._config.cameras[Number(btn.dataset.i)];
       const pic = this._hass.states[cam.entity]?.attributes?.entity_picture;
       if (!pic) return;
@@ -4003,6 +4121,7 @@ class FrigateCamerasCard extends HTMLElement {
   }
 
   _open(cam) {
+    this._clearTileTimers(); // the tiles, and their streams, go with the grid
     const { type, cameras, refresh_seconds, ...shared } = this._config;
     const card = document.createElement("frigate-timeline-card");
     card.setConfig({ ...shared, frigate_camera: cam.camera, camera_entity: cam.entity });
