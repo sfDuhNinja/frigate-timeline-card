@@ -69,6 +69,7 @@
  *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id, for the events WS call (default "frigate")
  *   height: 44                              # optional — timeline strip height in px
  *   show_motion: true                       # optional — draw the white motion histogram behind the activity bands (default true)
+ *   orientation: horizontal               # optional — "vertical" puts the timeline in a column beside the video, newest at the top, the way Frigate's own does (screens at least 600px wide; narrower ones keep the horizontal strip)
  *   pause_offscreen: true                   # optional — stop the live stream while the card is scrolled out of view or the app is in the background (default true)
  *   default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default 10)
  *   auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default 0 = disabled)
@@ -564,6 +565,9 @@ class FrigateTimelineCard extends HTMLElement {
 
   _build() {
     this._built = true;
+    // ponytail: decided once per build; rotating a phone past 600px needs a reload.
+    this._vertical = this._config.orientation === "vertical" && window.matchMedia("(min-width: 600px)").matches;
+    this.classList.toggle("ftc-vertical", this._vertical);
     this.innerHTML = `
       <ha-card>
         <div class="ftc-stage"><div class="ftc-zoom"></div></div>
@@ -723,8 +727,8 @@ class FrigateTimelineCard extends HTMLElement {
           border-left: 2px dashed rgba(255, 255, 255, 0.95); transform: translateX(-50%);
           filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.9));
         }
-        frigate-timeline-card .ftc-now-line.clip::after { border-left-color: #4fc3f7; }
-        frigate-timeline-card .ftc-now-line.scrubbing::after { border-left-color: #4fc3f7; border-left-width: 3px; }
+        frigate-timeline-card .ftc-now-line.clip::after { border-color: #4fc3f7; }
+        frigate-timeline-card .ftc-now-line.scrubbing::after { border-color: #4fc3f7; border-left-width: 3px; }
         frigate-timeline-card .ftc-scrub {
           position: absolute; top: 0; bottom: 0; width: 2px; background: #4fc3f7;
           box-shadow: 0 0 6px rgba(79, 195, 247, 0.9); pointer-events: none;
@@ -734,6 +738,44 @@ class FrigateTimelineCard extends HTMLElement {
           color: var(--secondary-text-color, #999); margin-top: 2px;
         }
         frigate-timeline-card .ftc-tick { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+        /* orientation: vertical — the strip becomes a column beside the
+           video, time running bottom to top. Everything placed with "left"
+           above is placed with "bottom" by the script instead. */
+        frigate-timeline-card.ftc-vertical ha-card {
+          display: grid; grid-template-columns: minmax(0, 1fr) auto;
+        }
+        frigate-timeline-card.ftc-vertical .ftc-stage {
+          grid-column: 1; border-radius: var(--ha-card-border-radius, 12px) 0 0 0;
+        }
+        frigate-timeline-card.ftc-vertical .ftc-toolbar { grid-column: 1; }
+        frigate-timeline-card.ftc-vertical .ftc-timeline {
+          grid-column: 2; grid-row: 1 / 3; position: relative; padding: 0;
+          width: calc(var(--ftc-track-h, 44px) + 76px);
+        }
+        frigate-timeline-card.ftc-vertical .ftc-trackwrap {
+          position: absolute; top: 14px; bottom: 14px; right: 8px; width: var(--ftc-track-h, 44px);
+        }
+        frigate-timeline-card.ftc-vertical .ftc-track { height: 100%; }
+        frigate-timeline-card.ftc-vertical .ftc-band { top: auto; bottom: auto; left: 0; right: 0; }
+        frigate-timeline-card.ftc-vertical .ftc-ticks {
+          position: absolute; top: 14px; bottom: 14px; left: 0; right: calc(var(--ftc-track-h, 44px) + 14px);
+          height: auto; margin: 0;
+        }
+        frigate-timeline-card.ftc-vertical .ftc-tick { right: 0; transform: translateY(50%); }
+        frigate-timeline-card.ftc-vertical .ftc-now-pill {
+          top: auto; right: calc(100% + 4px); transform: translateY(50%); padding: 3px 7px;
+        }
+        frigate-timeline-card.ftc-vertical .ftc-now-line {
+          top: auto; left: -8px; right: 0; width: auto; height: 20px;
+          transform: translateY(50%); cursor: ns-resize;
+        }
+        frigate-timeline-card.ftc-vertical .ftc-now-line::after {
+          top: 50%; bottom: auto; left: 0; right: 0; border-left: none;
+          border-top: 2px dashed rgba(255, 255, 255, 0.95); transform: translateY(-50%);
+        }
+        frigate-timeline-card.ftc-vertical .ftc-now-line.clip::after { border-color: #4fc3f7; }
+        frigate-timeline-card.ftc-vertical .ftc-now-line.scrubbing::after { border-color: #4fc3f7; border-top-width: 3px; }
+        frigate-timeline-card.ftc-vertical .ftc-scrub { top: auto; left: 0; right: 0; width: auto; height: 2px; }
         frigate-timeline-card .ftc-stage-error {
           position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
           text-align: center; padding: 16px; color: #f2b632; font-size: 13px; line-height: 1.4;
@@ -793,7 +835,7 @@ class FrigateTimelineCard extends HTMLElement {
 
   /** `NOW_RIGHT_MARGIN_PX` worth of time at the current zoom. */
   _nowMarginMs(spanMs) {
-    const width = Math.round(this._trackEl?.clientWidth) || 300;
+    const width = this._trackLen();
     return (spanMs / width) * NOW_RIGHT_MARGIN_PX;
   }
 
@@ -1142,16 +1184,35 @@ class FrigateTimelineCard extends HTMLElement {
   _isAtNow(ts) {
     if (this._dayKey !== todayKey()) return false;
     const win = this._currentWindow();
-    const width = Math.round(this._trackEl?.clientWidth) || 300;
+    const width = this._trackLen();
     const toleranceMs = ((win.end - win.start) / width) * NOW_SNAP_PX;
     return ts >= Date.now() - toleranceMs;
   }
 
-  /** Clamped 0-1 position of a client X coordinate along the track. */
-  _fracFromClientX(x) {
+  /** Track length along the time axis, in CSS pixels. */
+  _trackLen() {
+    return Math.round(this._vertical ? this._trackEl?.clientHeight : this._trackEl?.clientWidth) || 300;
+  }
+
+  /** The CSS property a moment's position along the track is written to. */
+  get _posProp() {
+    return this._vertical ? "bottom" : "left";
+  }
+
+  /** A pointer or touch event's coordinate along the time axis. */
+  _axisPos(e) {
+    const p = e.touches?.[0] ?? e;
+    return this._vertical ? p.clientY : p.clientX;
+  }
+
+  /** Clamped 0-1 position of an axis coordinate along the track. Vertical
+   * runs newest-at-the-top, as Frigate's does, so that axis is flipped. */
+  _fracFromPos(pos) {
     const rect = this._trackEl.getBoundingClientRect();
-    if (!rect.width || x == null) return null;
-    return Math.min(1, Math.max(0, (x - rect.left) / rect.width));
+    const len = this._vertical ? rect.height : rect.width;
+    if (!len || pos == null) return null;
+    const frac = this._vertical ? (rect.bottom - pos) / len : (pos - rect.left) / len;
+    return Math.min(1, Math.max(0, frac));
   }
 
   /** Timestamp at a given 0-1 fraction of a window. */
@@ -1164,7 +1225,7 @@ class FrigateTimelineCard extends HTMLElement {
     let dragging = false;
     let lastTs = null;
 
-    const fracFromEvent = (e) => this._fracFromClientX(e.clientX ?? e.touches?.[0]?.clientX);
+    const fracFromEvent = (e) => this._fracFromPos(this._axisPos(e));
 
     // Dragging the selector to either end scrolls the window that way, so
     // a zoomed-in strip can be scrubbed past its own edges instead of
@@ -1190,23 +1251,25 @@ class FrigateTimelineCard extends HTMLElement {
       const rect = this._trackEl.getBoundingClientRect();
       // Panning a full-day view means nothing — there is nothing either
       // side of it to scroll to.
-      if (rect.width && lastClientX != null && (this._windowHours || 24) < 24) {
+      const [lo, hi] = this._vertical ? [rect.top, rect.bottom] : [rect.left, rect.right];
+      if (hi > lo && lastClientX != null && (this._windowHours || 24) < 24) {
         let push = 0;
-        if (lastClientX < rect.left + EDGE_ZONE_PX) push = (lastClientX - (rect.left + EDGE_ZONE_PX)) / EDGE_ZONE_PX;
-        else if (lastClientX > rect.right - EDGE_ZONE_PX) push = (lastClientX - (rect.right - EDGE_ZONE_PX)) / EDGE_ZONE_PX;
+        if (lastClientX < lo + EDGE_ZONE_PX) push = (lastClientX - (lo + EDGE_ZONE_PX)) / EDGE_ZONE_PX;
+        else if (lastClientX > hi - EDGE_ZONE_PX) push = (lastClientX - (hi - EDGE_ZONE_PX)) / EDGE_ZONE_PX;
         if (push) {
           // Past the edge entirely counts as a full push, not more — a
           // finger dragged off the card shouldn't fling the day past.
           push = Math.max(-1, Math.min(1, push));
+          if (this._vertical) push = -push; // the top edge is the later one
           const win = this._currentWindow();
           const day = dayWindow(this._dayKey);
-          const msPerPx = (win.end - win.start) / rect.width;
+          const msPerPx = (win.end - win.start) / (hi - lo);
           const center = this._centerMs ?? win.start + (win.end - win.start) / 2;
           this._centerMs = Math.min(day.end, Math.max(day.start, center + push * MAX_PAN_PX_PER_FRAME * msPerPx));
           this._scheduleRender();
           // The window moved under a stationary finger, so the same point
           // on screen is a different moment now.
-          const frac = this._fracFromClientX(lastClientX);
+          const frac = this._fracFromPos(lastClientX);
           if (frac != null) trackSeekTarget(previewAt(frac));
         }
       }
@@ -1223,8 +1286,8 @@ class FrigateTimelineCard extends HTMLElement {
       const pct = frac * 100;
       this._nowLineEl.style.display = "";
       this._nowPillEl.style.display = "";
-      this._nowLineEl.style.left = `${pct}%`;
-      this._nowPillEl.style.left = `${pct}%`;
+      this._nowLineEl.style[this._posProp] = `${pct}%`;
+      this._nowPillEl.style[this._posProp] = `${pct}%`;
       this._nowPillEl.textContent = this._formatClock(new Date(ts));
       // Blue the moment the drag leaves the present, red again as it comes
       // back — so the colour says where you will land before you let go,
@@ -1270,7 +1333,7 @@ class FrigateTimelineCard extends HTMLElement {
       // when the drag ends, so nothing needs resuming.
       (this._videoEl || this._streamEl)?.pause?.();
       this._nowLineEl.classList.add("scrubbing");
-      lastClientX = e.clientX ?? null;
+      lastClientX = this._axisPos(e) ?? null;
       const frac = fracFromEvent(e);
       if (frac != null) trackSeekTarget(previewAt(frac));
       stopAutoPan();
@@ -1278,7 +1341,7 @@ class FrigateTimelineCard extends HTMLElement {
     });
     this._windowDragMove = (e) => {
       if (!dragging) return;
-      lastClientX = e.clientX ?? e.touches?.[0]?.clientX ?? lastClientX;
+      lastClientX = this._axisPos(e) ?? lastClientX;
       const frac = fracFromEvent(e);
       if (frac == null) return;
       trackSeekTarget(previewAt(frac));
@@ -1320,7 +1383,7 @@ class FrigateTimelineCard extends HTMLElement {
     let panned = false;
     let startX = 0;
     let startCenterMs = 0;
-    const fracFromEvent = (e) => this._fracFromClientX(e.clientX ?? e.touches?.[0]?.clientX);
+    const fracFromEvent = (e) => this._fracFromPos(this._axisPos(e));
     const showScrub = (frac) => {
       let el = this._trackEl.querySelector(".ftc-scrub");
       if (!el) {
@@ -1328,7 +1391,7 @@ class FrigateTimelineCard extends HTMLElement {
         el.className = "ftc-scrub";
         this._trackEl.appendChild(el);
       }
-      el.style.left = `${frac * 100}%`;
+      el.style[this._posProp] = `${frac * 100}%`;
     };
     const clearScrub = () => {
       this._trackEl.querySelector(".ftc-scrub")?.remove();
@@ -1338,7 +1401,7 @@ class FrigateTimelineCard extends HTMLElement {
       if (this._pinchActive) return;
       dragging = true;
       panned = false;
-      startX = e.clientX;
+      startX = this._axisPos(e);
       const win = this._currentWindow();
       startCenterMs = this._centerMs ?? win.start + (win.end - win.start) / 2;
       const frac = fracFromEvent(e);
@@ -1346,16 +1409,14 @@ class FrigateTimelineCard extends HTMLElement {
     });
     this._trackEl.addEventListener("pointermove", (e) => {
       if (!dragging || this._pinchActive) return;
-      const dx = e.clientX - startX;
+      const dx = (this._axisPos(e) - startX) * (this._vertical ? -1 : 1);
       if (!panned && Math.abs(dx) > 6 && (this._windowHours || 24) < 24) {
         panned = true;
         clearScrub();
       }
       if (panned) {
-        const rect = this._trackEl.getBoundingClientRect();
-        if (!rect.width) return;
         const win = this._currentWindow();
-        const msPerPx = (win.end - win.start) / rect.width;
+        const msPerPx = (win.end - win.start) / this._trackLen();
         this._centerMs = startCenterMs - dx * msPerPx;
         this._scheduleRender();
         return;
@@ -1395,7 +1456,7 @@ class FrigateTimelineCard extends HTMLElement {
       "wheel",
       (e) => {
         e.preventDefault();
-        const frac = this._fracFromClientX(e.clientX);
+        const frac = this._fracFromPos(this._axisPos(e));
         if (frac == null) return;
         const win = this._currentWindow();
         const atMs = this._msAtFrac(win, frac);
@@ -1421,8 +1482,7 @@ class FrigateTimelineCard extends HTMLElement {
           clearScrub();
           pinchStartDist = touchDist(e.touches);
           pinchStartHours = this._windowHours || 24;
-          const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-          const frac = this._fracFromClientX(midX) ?? 0;
+          const frac = this._fracFromPos((this._axisPos(e) + this._axisPos({ touches: [e.touches[1]] })) / 2) ?? 0;
           const win = this._currentWindow();
           pinchCenterMs = this._msAtFrac(win, frac);
         }
@@ -3282,8 +3342,8 @@ class FrigateTimelineCard extends HTMLElement {
     this._nowLineEl.classList.toggle("clip", isClip);
     if (!inWindow) return;
     const pct = ((now - win.start) / (win.end - win.start)) * 100;
-    this._nowPillEl.style.left = `${pct}%`;
-    this._nowLineEl.style.left = `${pct}%`;
+    this._nowPillEl.style[this._posProp] = `${pct}%`;
+    this._nowLineEl.style[this._posProp] = `${pct}%`;
     this._nowPillEl.textContent = this._formatClock(new Date(now));
   }
 
@@ -3355,7 +3415,11 @@ class FrigateTimelineCard extends HTMLElement {
     // in it. A day is thousands of segments against a few hundred pixels;
     // drawn individually they would be sub-pixel slivers fighting over the
     // same column for a picture no different from this one.
-    const buckets = Math.max(60, Math.min(600, Math.round(cssWidth)));
+    // `len` runs along time, `thick` across it — swapped when vertical.
+    const v = this._vertical;
+    const len = v ? height : width;
+    const thick = v ? width : height;
+    const buckets = Math.max(60, Math.min(600, Math.round(v ? cssHeight : cssWidth)));
     const peaks = new Float64Array(buckets);
     let max = 0;
     for (const m of this._recordings) {
@@ -3373,7 +3437,7 @@ class FrigateTimelineCard extends HTMLElement {
     ctx.fillStyle =
       getComputedStyle(this._trackEl).getPropertyValue("--frigate-timeline-motion").trim() ||
       "rgba(255, 255, 255, 0.62)";
-    const columnWidth = width / buckets;
+    const columnWidth = len / buckets;
     const barWidth = Math.max(ratio, columnWidth - ratio * 0.4);
     const radius = Math.min(ratio, barWidth / 2);
     const rounded = typeof ctx.roundRect === "function";
@@ -3387,12 +3451,13 @@ class FrigateTimelineCard extends HTMLElement {
       if (!peaks[i]) continue;
       const barHeight = Math.max(
         ratio * 2,
-        (Math.sqrt(peaks[i] / max) * MOTION_MAX_HEIGHT_PCT * height) / 100
+        (Math.sqrt(peaks[i] / max) * MOTION_MAX_HEIGHT_PCT * thick) / 100
       );
-      const x = i * columnWidth;
-      const y = (height - barHeight) / 2;
-      if (rounded) ctx.roundRect(x, y, barWidth, barHeight, radius);
-      else ctx.fillRect(x, y, barWidth, barHeight);
+      const along = i * columnWidth;
+      const across = (thick - barHeight) / 2;
+      const r = v ? [across, len - along - barWidth, barHeight, barWidth] : [along, across, barWidth, barHeight];
+      if (rounded) ctx.roundRect(...r, radius);
+      else ctx.fillRect(...r);
     }
     if (rounded) ctx.fill();
   }
@@ -3444,7 +3509,7 @@ class FrigateTimelineCard extends HTMLElement {
         if (en <= st) continue;
         const left = ((st - win.start) / span) * 100;
         const width = Math.max(((en - st) / span) * 100, 0.15);
-        bandsHtml += `<div class="ftc-band ${pass}" style="left:${left}%;width:max(2px, ${width}%);"></div>`;
+        bandsHtml += `<div class="ftc-band ${pass}" style="${this._posProp}:${left}%;${this._vertical ? "height" : "width"}:max(2px, ${width}%);"></div>`;
       }
     }
     this._ensureTrackLayers();
@@ -3462,7 +3527,7 @@ class FrigateTimelineCard extends HTMLElement {
       const ampm = h >= 12 ? "PM" : "AM";
       h = h % 12 || 12;
       const label = stepMs < 3600000 ? `${h}:${pad2(d.getMinutes())}` : `${h}:${pad2(d.getMinutes())} ${ampm}`;
-      ticksHtml += `<span class="ftc-tick" style="left:${pct}%">${label}</span>`;
+      ticksHtml += `<span class="ftc-tick" style="${this._posProp}:${pct}%">${label}</span>`;
     }
     this._ticksEl.innerHTML = ticksHtml;
 
