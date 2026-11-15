@@ -3932,30 +3932,44 @@ class FrigateCamerasCard extends HTMLElement {
     }
   }
 
-  /** The Frigate integration's `binary_sensor.<camera>_<label>_occupancy`
-   * entities for one camera, found once by name. Matched with any prefix
-   * because a few of them come out as `<other>_<camera>_<label>_…`. */
-  _occupancyEntities(cam) {
-    this._occupancy ??= {};
-    if (!this._occupancy[cam.entity]) {
+  /** The Frigate integration's per-label entities for one camera — e.g.
+   * `binary_sensor.<camera>_<label>_occupancy` — found once by name, as
+   * `[entity_id, label]`. Matched with any prefix because a few of them
+   * come out as `<other>_<camera>_<label>_…`. */
+  _labelEntities(cam, domain, suffix) {
+    this._labelCache ??= {};
+    const key = `${cam.entity}|${domain}|${suffix}`;
+    if (!this._labelCache[key]) {
       const objectId = cam.entity.split(".")[1];
-      const re = new RegExp(`^binary_sensor\\.(?:.*_)?${objectId}_(.+)_occupancy$`);
-      this._occupancy[cam.entity] = Object.keys(this._hass.states)
+      const re = new RegExp(`^${domain}\\.(?:.*_)?${objectId}_(.+)_${suffix}$`);
+      this._labelCache[key] = Object.keys(this._hass.states)
         .map((id) => [id, id.match(re)?.[1]])
         .filter(([, label]) => label && label !== "all");
     }
-    return this._occupancy[cam.entity];
+    return this._labelCache[key];
   }
 
-  /** Frigate's object icons: one per kind of object currently in view. */
+  /**
+   * Frigate's own grid markers, from the Frigate integration's entities:
+   *   - an icon per kind of object in view (`<label>_occupancy`), parked
+   *     ones included, as Frigate shows them;
+   *   - the red dot while the camera sees motion (`<camera>_motion`).
+   * And, like Frigate, the tile goes live only for objects that are
+   * actually moving (`<label>_active_count` > 0) — a parked car is in view
+   * all night and would otherwise keep a stream open the whole time.
+   */
   _updateObjects() {
     if (!this._hass) return;
+    const st = this._hass.states;
     this.querySelectorAll(".fcc-cam").forEach((btn) => {
       const cam = this._config.cameras[Number(btn.dataset.i)];
-      const labels = this._occupancyEntities(cam)
-        .filter(([id]) => this._hass.states[id]?.state === "on")
+      const labels = this._labelEntities(cam, "binary_sensor", "occupancy")
+        .filter(([id]) => st[id]?.state === "on")
         .map(([, label]) => label);
-      this._setTileLive(btn, cam, labels.length > 0);
+      const moving = this._labelEntities(cam, "sensor", "active_count").some(([id]) => Number(st[id]?.state) > 0);
+      this._setTileLive(btn, cam, moving);
+      const motion = st[`binary_sensor.${cam.entity.split(".")[1]}_motion`]?.state === "on";
+      btn.querySelector(".fcc-motion").hidden = !motion;
       const key = labels.join(",");
       if (btn.dataset.objects === key) return;
       btn.dataset.objects = key;
@@ -4008,7 +4022,7 @@ class FrigateCamerasCard extends HTMLElement {
           .map(
             (c, i) => `<button class="fcc-cam" data-i="${i}">
               <img alt="">
-              <span class="fcc-objects"></span>
+              <span class="fcc-badges"><span class="fcc-objects"></span><span class="fcc-motion" hidden></span></span>
               ${c.name ? `<span class="fcc-name"></span>` : ""}
             </button>`
           )
@@ -4033,9 +4047,16 @@ class FrigateCamerasCard extends HTMLElement {
         frigate-cameras-card .fcc-live {
           position: absolute; inset: 0; pointer-events: none;
         }
-        frigate-cameras-card .fcc-objects {
-          position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; z-index: 1;
+        frigate-cameras-card .fcc-badges {
+          position: absolute; top: 8px; right: 8px; display: flex; align-items: center; gap: 6px; z-index: 1;
         }
+        frigate-cameras-card .fcc-objects { display: flex; gap: 6px; }
+        frigate-cameras-card .fcc-motion {
+          width: 10px; height: 10px; margin: 0 4px; border-radius: 50%; background: #ef4444;
+          box-shadow: 0 0 4px rgba(0, 0, 0, 0.6); animation: fcc-pulse 1.6s ease-in-out infinite;
+        }
+        frigate-cameras-card .fcc-motion[hidden] { display: none; }
+        @keyframes fcc-pulse { 50% { opacity: 0.35; } }
         frigate-cameras-card .fcc-objects span {
           display: flex; align-items: center; justify-content: center;
           width: 30px; height: 30px; border-radius: 50%;

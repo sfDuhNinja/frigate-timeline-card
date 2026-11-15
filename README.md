@@ -110,6 +110,6 @@ cameras:
 
 Each still shows Frigate's object icons (person, car, cat, …) while that kind of object is in view, read from the Frigate integration's `binary_sensor.<camera>_<label>_occupancy` entities.
 
-While Frigate is tracking an object on a camera, its tile switches from the still to a live stream, like Frigate's own grid, and back to the still 10 seconds after the last object leaves. Tiles use each camera's `<camera>_sub` go2rtc stream; set `tile_stream: main` on a camera that has no sub stream.
+A red dot pulses while the camera sees motion (`binary_sensor.<camera>_motion`). While Frigate is tracking a moving object on a camera (`sensor.<camera>_<label>_active_count` above 0; parked objects don't count), its tile switches from the still to a live stream, like Frigate's own grid, and back to the still 10 seconds after the last one stops or leaves. Tiles use each camera's `<camera>_sub` go2rtc stream; set `tile_stream: main` on a camera that has no sub stream.
 
 Every key other than `cameras` and `refresh_seconds` is passed to the timeline card a camera opens in.
