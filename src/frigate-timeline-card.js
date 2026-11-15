@@ -69,7 +69,7 @@
  *   frigate_instance_id: frigate            # optional — Frigate HA integration config-entry id, for the events WS call (default "frigate")
  *   height: 44                              # optional — timeline strip height in px
  *   show_motion: true                       # optional — draw the white motion histogram behind the activity bands (default true)
- *   orientation: horizontal               # optional — "vertical" puts the timeline in a column beside the video, newest at the top, the way Frigate's own does (screens at least 600px wide; narrower ones keep the horizontal strip)
+ *   orientation: horizontal               # optional — "vertical" puts the timeline in a column beside the video, newest at the top, the way Frigate's own does (under the video on screens narrower than 600px)
  *   pause_offscreen: true                   # optional — stop the live stream while the card is scrolled out of view or the app is in the background (default true)
  *   default_zoom_hours: 10                  # optional — initial timeline zoom window, in hours (default 10)
  *   auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default 0 = disabled)
@@ -565,8 +565,7 @@ class FrigateTimelineCard extends HTMLElement {
 
   _build() {
     this._built = true;
-    // ponytail: decided once per build; rotating a phone past 600px needs a reload.
-    this._vertical = this._config.orientation === "vertical" && window.matchMedia("(min-width: 600px)").matches;
+    this._vertical = this._config.orientation === "vertical";
     this.classList.toggle("ftc-vertical", this._vertical);
     this.innerHTML = `
       <ha-card>
@@ -740,7 +739,10 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card .ftc-tick { position: absolute; transform: translateX(-50%); white-space: nowrap; }
         /* orientation: vertical — the strip becomes a column beside the
            video, time running bottom to top. Everything placed with "left"
-           above is placed with "bottom" by the script instead. */
+           above is placed with "bottom" by the script instead. On a phone
+           the column moves under the video instead — see the media query
+           below. */
+        frigate-timeline-card.ftc-vertical { --ftc-vtrack-w: 96px; }
         frigate-timeline-card.ftc-vertical ha-card {
           display: grid; grid-template-columns: minmax(0, 1fr) auto;
         }
@@ -750,15 +752,15 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card.ftc-vertical .ftc-toolbar { grid-column: 1; }
         frigate-timeline-card.ftc-vertical .ftc-timeline {
           grid-column: 2; grid-row: 1 / 3; position: relative; padding: 0;
-          width: calc(var(--ftc-track-h, 44px) + 76px);
+          width: calc(var(--ftc-vtrack-w) + 64px);
         }
         frigate-timeline-card.ftc-vertical .ftc-trackwrap {
-          position: absolute; top: 14px; bottom: 14px; right: 8px; width: var(--ftc-track-h, 44px);
+          position: absolute; top: 14px; bottom: 14px; right: 8px; width: var(--ftc-vtrack-w);
         }
         frigate-timeline-card.ftc-vertical .ftc-track { height: 100%; }
         frigate-timeline-card.ftc-vertical .ftc-band { top: auto; bottom: auto; left: 0; right: 0; }
         frigate-timeline-card.ftc-vertical .ftc-ticks {
-          position: absolute; top: 14px; bottom: 14px; left: 0; right: calc(var(--ftc-track-h, 44px) + 14px);
+          position: absolute; top: 14px; bottom: 14px; left: 0; right: calc(var(--ftc-vtrack-w) + 14px);
           height: auto; margin: 0;
         }
         frigate-timeline-card.ftc-vertical .ftc-tick { right: 0; transform: translateY(50%); }
@@ -776,6 +778,17 @@ class FrigateTimelineCard extends HTMLElement {
         frigate-timeline-card.ftc-vertical .ftc-now-line.clip::after { border-color: #4fc3f7; }
         frigate-timeline-card.ftc-vertical .ftc-now-line.scrubbing::after { border-color: #4fc3f7; border-top-width: 3px; }
         frigate-timeline-card.ftc-vertical .ftc-scrub { top: auto; left: 0; right: 0; width: auto; height: 2px; }
+        @media (max-width: 599px) {
+          frigate-timeline-card.ftc-vertical ha-card { grid-template-columns: minmax(0, 1fr); }
+          frigate-timeline-card.ftc-vertical .ftc-stage {
+            border-radius: var(--ha-card-border-radius, 12px) var(--ha-card-border-radius, 12px) 0 0;
+          }
+          frigate-timeline-card.ftc-vertical .ftc-timeline {
+            grid-column: 1; grid-row: auto; width: auto; height: 300px;
+          }
+          frigate-timeline-card.ftc-vertical .ftc-trackwrap { left: 64px; right: 10px; width: auto; }
+          frigate-timeline-card.ftc-vertical .ftc-ticks { right: auto; width: 50px; }
+        }
         frigate-timeline-card .ftc-stage-error {
           position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
           text-align: center; padding: 16px; color: #f2b632; font-size: 13px; line-height: 1.4;

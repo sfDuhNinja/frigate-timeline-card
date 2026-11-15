@@ -35,7 +35,7 @@ default_zoom_hours: 10                  # optional — initial timeline zoom win
 auto_hide_seconds: 0                    # optional — auto-collapse the timeline after N seconds of no interaction (default: 0, disabled)
 frigate_stream: auto                    # optional — "auto" (default), "main" or "sub"
 show_motion: true                       # optional — draw the motion histogram (default: true)
-orientation: horizontal                 # optional — "vertical" for a Frigate-style column beside the video
+orientation: horizontal                 # optional — "vertical" for a Frigate-style column beside the video (under it on phones)
 pause_offscreen: true                   # optional — stop streaming while off screen (default: true)
 ```
 
@@ -54,7 +54,7 @@ The visual editor covers what people actually change: Frigate host and port, the
 | `go2rtc_url` | no | Frigate host on port `1984` | Only used when `live_source: frigate`, and only needed for a go2rtc that isn't the one Frigate bundles. Setting it forces a direct browser→go2rtc connection instead of Home Assistant's proxy, which then has to be reachable from every device and breaks on https dashboards if it isn't TLS itself |
 | `frigate_stream` | no | `auto` | Only used when `live_source: frigate`. `auto` uses the full stream on a desktop and the sub stream everywhere else; `main` and `sub` force one |
 | `show_motion` | no | `true` | Draw the white motion histogram behind the activity bands |
-| `orientation` | no | `horizontal` | `vertical` puts the timeline in a column to the right of the video, newest at the top, like Frigate's own. Applies on screens at least 600px wide; narrower ones keep the horizontal strip |
+| `orientation` | no | `horizontal` | `vertical` puts the timeline in a column to the right of the video, newest at the top, like Frigate's own. On screens under 600px wide the column sits under the video, full width |
 | `pause_offscreen` | no | `true` | Stop the live stream while the card is scrolled out of view or the app is in the background |
 
 ## Timeline
