@@ -420,7 +420,7 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   disconnectedCallback() {
-    this._stopFling();
+    this._closeCalendar();
     if (this._tickInterval) {
       clearInterval(this._tickInterval);
       this._tickInterval = null;
@@ -570,7 +570,8 @@ class FrigateTimelineCard extends HTMLElement {
         <div class="ftc-stage"><div class="ftc-zoom"></div></div>
         <div class="ftc-toolbar">
           <div class="ftc-daynav">
-            <label class="ftc-daypick"><span class="ftc-daylabel"></span><input type="date" class="ftc-dateinput"></label>
+            <button class="ftc-daypick"><span class="ftc-daylabel"></span></button>
+            <div class="ftc-cal" hidden></div>
           </div>
           <div class="ftc-controlbar"></div>
         </div>
@@ -660,17 +661,37 @@ class FrigateTimelineCard extends HTMLElement {
           display: flex; align-items: center; gap: 6px;
           font-size: 13px; color: var(--primary-text-color, #fff);
         }
+        frigate-timeline-card .ftc-daynav { position: relative; }
         frigate-timeline-card .ftc-daypick {
-          position: relative; display: inline-flex; align-items: center; cursor: pointer;
-          padding: 3px 8px; border-radius: 6px;
+          display: inline-flex; align-items: center; cursor: pointer;
+          padding: 3px 8px; border-radius: 6px; border: 0; background: none; color: inherit; font: inherit;
         }
         frigate-timeline-card .ftc-daypick:hover { background: rgba(255, 255, 255, 0.08); }
         frigate-timeline-card .ftc-daylabel { min-width: 60px; text-align: center; }
         frigate-timeline-card .ftc-daylabel::after { content: " ▾"; opacity: 0.6; }
-        frigate-timeline-card .ftc-dateinput {
-          position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0;
-          opacity: 0; border: 0; cursor: pointer; color-scheme: dark;
+        frigate-timeline-card .ftc-cal {
+          position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 10; width: 252px; padding: 10px;
+          border-radius: 14px; color: #fff; font-size: 14px;
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+          background: rgba(36, 36, 38, 0.9); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+          -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
         }
+        frigate-timeline-card .ftc-cal[hidden] { display: none; }
+        frigate-timeline-card .ftc-cal.ftc-cal-down { bottom: auto; top: calc(100% + 6px); }
+        frigate-timeline-card .ftc-cal-head {
+          display: flex; align-items: center; justify-content: space-between;
+          font-weight: 600; margin: 0 0 6px 6px; text-transform: capitalize;
+        }
+        frigate-timeline-card .ftc-cal button {
+          border: 0; background: none; color: inherit; font: inherit; cursor: pointer; padding: 0;
+        }
+        frigate-timeline-card .ftc-cal-head button { font-size: 22px; line-height: 1; padding: 2px 10px; color: #0a84ff; }
+        frigate-timeline-card .ftc-cal button:disabled { opacity: 0.28; cursor: default; }
+        frigate-timeline-card .ftc-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; }
+        frigate-timeline-card .ftc-cal-wd { font-size: 11px; font-weight: 600; opacity: 0.45; padding: 4px 0; text-transform: uppercase; }
+        frigate-timeline-card .ftc-cal-grid button { width: 32px; height: 32px; justify-self: center; border-radius: 50%; }
+        frigate-timeline-card .ftc-cal-grid .ftc-cal-today { color: #0a84ff; font-weight: 600; }
+        frigate-timeline-card .ftc-cal-grid .ftc-cal-sel { background: #0a84ff; color: #fff; font-weight: 600; }
         frigate-timeline-card .ftc-navbtn {
           background: none; border: none; color: inherit; font-size: 16px; line-height: 1;
           cursor: pointer; padding: 3px 9px; border-radius: 6px;
@@ -685,6 +706,14 @@ class FrigateTimelineCard extends HTMLElement {
            zoom level, where the old lopsided padding only worked at some. */
         frigate-timeline-card .ftc-timeline { padding: 22px 10px 8px 10px; }
         frigate-timeline-card .ftc-trackwrap { position: relative; }
+        frigate-timeline-card .ftc-scroller {
+          position: absolute; z-index: 2; overflow: auto; scrollbar-width: none;
+          overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+        }
+        frigate-timeline-card .ftc-scroller::-webkit-scrollbar { display: none; }
+        frigate-timeline-card .ftc-scroller > div { width: 1px; height: 1px; }
+        frigate-timeline-card:not(.ftc-vertical) .ftc-scroller { touch-action: pan-x; }
+        frigate-timeline-card.ftc-vertical .ftc-scroller { touch-action: pan-y; }
         frigate-timeline-card .ftc-track {
           position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
           background: #141414; touch-action: none;
@@ -823,36 +852,110 @@ class FrigateTimelineCard extends HTMLElement {
     this.style.setProperty("--ftc-track-h", `${this._config.height}px`);
     this._buildControlBar();
     this._wireTrackInteraction();
+    if (window.matchMedia?.("(pointer: coarse)").matches) this._wireNativeScroll();
     this._wireNowLineScrub();
     this._wireStageZoom();
     this._wireAutoHide();
-    // Native date input: iOS/Safari and Chrome open their own month
-    // calendar, no picker code to ship. It sits invisible over the label;
-    // showPicker() covers desktop browsers, where a click alone only
-    // focuses the input's text segments.
-    this._dateInputEl = this.querySelector(".ftc-dateinput");
-    this._dateInputEl.addEventListener("click", () => {
-      try { this._dateInputEl.showPicker(); } catch (_) {}
-    });
-    this._dateInputEl.addEventListener("change", () => {
-      const v = this._dateInputEl.value;
-      if (!v || v > todayKey() || v === this._dayKey) return this._updateDayNavState();
-      this._dayKey = v;
+    this._calEl = this.querySelector(".ftc-cal");
+    this.querySelector(".ftc-daypick").addEventListener("click", () =>
+      this._calEl.hidden ? this._openCalendar() : this._closeCalendar()
+    );
+    this._calEl.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.nav) {
+        const [y, m] = this._calMonth;
+        this._calMonth = [y, m + Number(b.dataset.nav)];
+        return this._renderCalendar();
+      }
+      this._closeCalendar();
+      if (b.dataset.day === this._dayKey) return;
+      this._dayKey = b.dataset.day;
       this._resetZoom();
       this._ensureData();
-      this._updateDayNavState();
     });
     this._updateDayNavState();
     this._applyI18n();
     this._showLive();
   }
 
-  /** Keeps the calendar on the viewed day, with future days greyed out —
-   * there's never any data there. */
+  /** Keeps an open calendar on the viewed day. */
   _updateDayNavState() {
-    if (!this._dateInputEl) return;
-    this._dateInputEl.max = todayKey();
-    this._dateInputEl.value = this._dayKey;
+    if (this._calEl && !this._calEl.hidden) this._renderCalendar();
+  }
+
+  // ─── Day calendar ────────────────────────────────────────────────────
+  // Not a native date input: those can't grey out arbitrary days, and the
+  // point is to show which days have recordings.
+
+  _openCalendar() {
+    const [y, m] = this._dayKey.split("-").map(Number);
+    this._calMonth = [y, m - 1];
+    this._calEl.hidden = false;
+    this._renderCalendar();
+    // Above the toolbar (over the picture) unless the picture is too short
+    // for it, as on a phone; then over the timeline below.
+    this._calEl.classList.remove("ftc-cal-down");
+    const card = this.querySelector("ha-card").getBoundingClientRect();
+    if (this._calEl.getBoundingClientRect().top < card.top) this._calEl.classList.add("ftc-cal-down");
+    this._ensureRecordingDays().then(() => this._updateDayNavState());
+    this._calOutside = (e) => {
+      if (!e.composedPath().includes(this.querySelector(".ftc-daynav"))) this._closeCalendar();
+    };
+    document.addEventListener("pointerdown", this._calOutside, true);
+  }
+
+  _closeCalendar() {
+    if (this._calEl) this._calEl.hidden = true;
+    document.removeEventListener("pointerdown", this._calOutside, true);
+  }
+
+  /** Days with any recording for this camera, from the Frigate
+   * integration's recordings summary; refetched at most every 5 minutes.
+   * Left null if it fails, which greys nothing out. */
+  async _ensureRecordingDays() {
+    const cam = this._cameraObjectId();
+    if (this._recDaysCam === cam && Date.now() - this._recDaysAt < 300000) return;
+    this._recDaysCam = cam;
+    this._recDaysAt = Date.now();
+    try {
+      let res = await this._hass.connection.sendMessagePromise({
+        type: "frigate/recordings/summary",
+        instance_id: this._config.frigate_instance_id,
+        camera: cam,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      });
+      if (typeof res === "string") res = JSON.parse(res);
+      this._recDays = new Set(res.map((d) => d.day));
+    } catch (err) {
+      console.warn("[frigate-timeline-card] WS frigate/recordings/summary failed", err);
+      this._recDaysAt = 0;
+    }
+  }
+
+  _renderCalendar() {
+    const [y, m] = this._calMonth;
+    const lang = this._hass?.locale?.language || undefined;
+    const today = todayKey();
+    const thisMonth = today.slice(0, 7);
+    const monthKey = `${new Date(y, m, 1).getFullYear()}-${pad2(new Date(y, m, 1).getMonth() + 1)}`;
+    const title = new Date(y, m, 1).toLocaleDateString(lang, { month: "long", year: "numeric" });
+    let html = `<div class="ftc-cal-head"><span>${title}</span><span>
+      <button data-nav="-1">‹</button><button data-nav="1" ${monthKey >= thisMonth ? "disabled" : ""}>›</button>
+    </span></div><div class="ftc-cal-grid">`;
+    for (let i = 0; i < 7; i++) {
+      // 2024-01-01 was a Monday
+      html += `<span class="ftc-cal-wd">${new Date(2024, 0, 1 + i).toLocaleDateString(lang, { weekday: "narrow" })}</span>`;
+    }
+    html += "<span></span>".repeat((new Date(y, m, 1).getDay() + 6) % 7);
+    const days = new Date(y, m + 1, 0).getDate();
+    for (let d = 1; d <= days; d++) {
+      const key = `${monthKey}-${pad2(d)}`;
+      const off = key > today || (this._recDays && !this._recDays.has(key) && key !== this._dayKey);
+      const cls = key === this._dayKey ? "ftc-cal-sel" : key === today ? "ftc-cal-today" : "";
+      html += `<button data-day="${key}" class="${cls}" ${off ? "disabled" : ""}>${d}</button>`;
+    }
+    this._calEl.innerHTML = html + "</div>";
   }
 
   // ─── Zoom / pan ──────────────────────────────────────────────────────
@@ -861,6 +964,13 @@ class FrigateTimelineCard extends HTMLElement {
   _nowMarginMs(spanMs) {
     const width = this._trackLen();
     return (spanMs / width) * NOW_RIGHT_MARGIN_PX;
+  }
+
+  /** The viewed day, ending just past now when it's today. */
+  _dayRange(referenceSpan) {
+    const day = dayWindow(this._dayKey);
+    if (this._dayKey === todayKey()) day.end = Math.min(day.end, Date.now() + this._nowMarginMs(referenceSpan));
+    return day;
   }
 
   _currentWindow() {
@@ -877,8 +987,7 @@ class FrigateTimelineCard extends HTMLElement {
       this._windowHours && this._windowHours < 24
         ? this._windowHours * 3600000
         : Math.max(3600000, Math.min(day.end, Date.now()) - day.start);
-    const dayEnd =
-      this._dayKey === todayKey() ? Math.min(day.end, Date.now() + this._nowMarginMs(referenceSpan)) : day.end;
+    const dayEnd = this._dayRange(referenceSpan).end;
     if (!this._windowHours || this._windowHours >= 24) return { start: day.start, end: dayEnd };
     const half = (this._windowHours * 3600000) / 2;
     const center = this._centerMs ?? day.start + (dayEnd - day.start) / 2;
@@ -913,7 +1022,6 @@ class FrigateTimelineCard extends HTMLElement {
    * mostly as "what just happened". Called on load, on a day change, and on
    * an explicit Live press. */
   _resetZoom() {
-    this._stopFling();
     this._windowHours = this._defaultZoomHours();
     this._recenterToNow();
   }
@@ -1476,12 +1584,8 @@ class FrigateTimelineCard extends HTMLElement {
       this._trackEl.querySelector(".ftc-scrub")?.remove();
     };
 
-    // Recent pan positions, for the fling's release velocity.
-    let samples = [];
     this._trackEl.addEventListener("pointerdown", (e) => {
-      this._stopFling();
       if (this._pinchActive) return;
-      samples = [];
       dragging = true;
       panned = false;
       startX = this._axisPos(e);
@@ -1502,25 +1606,15 @@ class FrigateTimelineCard extends HTMLElement {
         const msPerPx = (win.end - win.start) / this._trackLen();
         this._centerMs = startCenterMs - dx * msPerPx;
         this._scheduleRender();
-        const now = performance.now();
-        samples.push({ dx, t: now });
-        while (samples.length > 2 && now - samples[0].t > 100) samples.shift();
         return;
       }
       const frac = fracFromEvent(e);
       if (frac != null) showScrub(frac);
     });
-    const stopDrag = (e) => {
+    const stopDrag = () => {
       dragging = false;
       clearScrub();
-      if (!panned) return;
-      this._suppressNextClick = true;
-      // Touch release keeps the strip moving, like iOS scroll views.
-      const a = samples[0];
-      const b = samples[samples.length - 1];
-      if (e.type !== "pointerup" || e.pointerType === "mouse" || !a || b.t - a.t < 10) return;
-      if (performance.now() - b.t > 80) return; // finger stopped before lifting
-      this._fling((b.dx - a.dx) / (b.t - a.t));
+      if (panned) this._suppressNextClick = true;
     };
     this._trackEl.addEventListener("pointerup", stopDrag);
     this._trackEl.addEventListener("pointercancel", stopDrag);
@@ -1549,7 +1643,6 @@ class FrigateTimelineCard extends HTMLElement {
       "wheel",
       (e) => {
         e.preventDefault();
-        this._stopFling();
         const frac = this._fracFromPos(this._axisPos(e));
         if (frac == null) return;
         const win = this._currentWindow();
@@ -1571,7 +1664,6 @@ class FrigateTimelineCard extends HTMLElement {
       (e) => {
         if (e.touches.length === 2) {
           e.preventDefault();
-          this._stopFling();
           this._pinchActive = true;
           dragging = false;
           clearScrub();
@@ -1604,34 +1696,64 @@ class FrigateTimelineCard extends HTMLElement {
     });
   }
 
-  /** Momentum after a touch pan. `v` is px/ms along the strip; faster
-   * swipes are boosted more than linearly, so a quick flick travels far
-   * while a slow release just settles. Friction decays it to a stop, and
-   * it ends early at either end of the day. */
-  _fling(v) {
-    this._stopFling();
-    v *= 1 + Math.min(Math.abs(v), 4) * 0.6; // ponytail: acceleration curve, tune by feel
-    let last = performance.now();
-    const step = (now) => {
-      const dt = Math.min(now - last, 50);
-      last = now;
-      const win = this._currentWindow();
-      const msPerPx = (win.end - win.start) / this._trackLen();
-      const before = win.start;
-      this._centerMs = (win.start + win.end) / 2 - v * dt * msPerPx;
-      const after = this._currentWindow();
-      this._centerMs = (after.start + after.end) / 2; // no overshoot stored past the edge
-      this._scheduleRender();
-      v *= Math.pow(0.995, dt); // ~0.92 per 60Hz frame
-      if (Math.abs(v) < 0.02 || after.start === before) return (this._flingRaf = null);
-      this._flingRaf = requestAnimationFrame(step);
-    };
-    this._flingRaf = requestAnimationFrame(step);
+  /** Touch screens pan the zoomed strip with a real scroll container laid
+   * over the track, so iOS/Android supply their own momentum and edge
+   * bounce. Its scroll offset is the window's position in the day; the
+   * strip itself is still drawn by `_renderTimeline()`. Mouse keeps the
+   * drag-to-pan in `_wireTrackInteraction()`. */
+  _wireNativeScroll() {
+    const el = document.createElement("div");
+    el.className = "ftc-scroller";
+    el.appendChild(document.createElement("div"));
+    this._trackWrapEl.appendChild(el);
+    this._scrollerEl = el;
+    el.addEventListener(
+      "scroll",
+      () => {
+        const pos = this._vertical ? el.scrollTop : el.scrollLeft;
+        if (Math.abs(pos - (this._scrollSetPos ?? -9)) < 1) return; // our own write echoing back
+        this._scrollSetPos = null;
+        this._userScrollAt = performance.now();
+        const span = (this._windowHours || 24) * 3600000;
+        const { start, end } = this._dayRange(span);
+        const msPerPx = span / this._trackLen();
+        // Vertical runs newest-first, so its offset counts back from the end.
+        this._centerMs = this._vertical ? end - pos * msPerPx - span / 2 : start + pos * msPerPx + span / 2;
+        this._scheduleRender();
+      },
+      { passive: true }
+    );
+    el.addEventListener("click", (e) => {
+      const frac = this._fracFromPos(this._axisPos(e));
+      if (frac != null) this._seekTo(frac);
+    });
   }
 
-  _stopFling() {
-    if (this._flingRaf) cancelAnimationFrame(this._flingRaf);
-    this._flingRaf = null;
+  /** Sizes the scroller to the day and moves it to the window on screen —
+   * but never while a finger or momentum is driving it, since writing the
+   * scroll offset cancels the native momentum. */
+  _syncScroller(win) {
+    const el = this._scrollerEl;
+    if (!el) return;
+    const zoomed = this._windowHours && this._windowHours < 24;
+    el.style.display = zoomed ? "" : "none";
+    if (!zoomed) return;
+    const t = this._trackEl;
+    Object.assign(el.style, {
+      left: `${t.offsetLeft}px`, top: `${t.offsetTop}px`,
+      width: `${t.offsetWidth}px`, height: `${t.offsetHeight}px`,
+    });
+    const span = win.end - win.start;
+    const day = this._dayRange(span);
+    const msPerPx = span / this._trackLen();
+    el.firstChild.style[this._vertical ? "height" : "width"] = `${(day.end - day.start) / msPerPx}px`;
+    if (performance.now() - (this._userScrollAt || 0) < 250) return;
+    const pos = (this._vertical ? day.end - win.end : win.start - day.start) / msPerPx;
+    const cur = this._vertical ? el.scrollTop : el.scrollLeft;
+    if (Math.abs(cur - pos) < 1) return;
+    if (this._vertical) el.scrollTop = pos;
+    else el.scrollLeft = pos;
+    this._scrollSetPos = this._vertical ? el.scrollTop : el.scrollLeft;
   }
 
   // ─── Zoom pe imagine ─────────────────────────────────────────────────
@@ -3611,6 +3733,7 @@ class FrigateTimelineCard extends HTMLElement {
     }
     this._renderPending = false;
     const win = this._currentWindow();
+    this._syncScroller(win);
     const span = win.end - win.start;
     if (!(span > 0)) return;
 
