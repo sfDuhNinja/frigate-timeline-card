@@ -789,10 +789,11 @@ class FrigateTimelineCard extends HTMLElement {
             border-radius: var(--ha-card-border-radius, 12px) var(--ha-card-border-radius, 12px) 0 0;
           }
           frigate-timeline-card.ftc-vertical .ftc-timeline {
-            grid-column: 1; grid-row: auto; width: auto; height: max(300px, 60vh);
+            grid-column: 1; grid-row: auto; width: auto; height: max(260px, 40vh);
           }
-          frigate-timeline-card.ftc-vertical .ftc-trackwrap { left: 64px; right: 10px; width: auto; }
-          frigate-timeline-card.ftc-vertical .ftc-ticks { right: auto; width: 50px; }
+          /* Room at the bottom for a swipe card's pagination dots. */
+          frigate-timeline-card.ftc-vertical .ftc-trackwrap { left: 64px; right: 10px; width: auto; bottom: 30px; }
+          frigate-timeline-card.ftc-vertical .ftc-ticks { right: auto; width: 50px; bottom: 30px; }
         }
         frigate-timeline-card .ftc-stage-error {
           position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
