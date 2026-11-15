@@ -784,7 +784,7 @@ class FrigateTimelineCard extends HTMLElement {
             border-radius: var(--ha-card-border-radius, 12px) var(--ha-card-border-radius, 12px) 0 0;
           }
           frigate-timeline-card.ftc-vertical .ftc-timeline {
-            grid-column: 1; grid-row: auto; width: auto; height: 300px;
+            grid-column: 1; grid-row: auto; width: auto; height: max(300px, 60vh);
           }
           frigate-timeline-card.ftc-vertical .ftc-trackwrap { left: 64px; right: 10px; width: auto; }
           frigate-timeline-card.ftc-vertical .ftc-ticks { right: auto; width: 50px; }
@@ -3432,33 +3432,40 @@ class FrigateTimelineCard extends HTMLElement {
     const v = this._vertical;
     const len = v ? height : width;
     const thick = v ? width : height;
-    const buckets = Math.max(60, Math.min(600, Math.round(v ? cssHeight : cssWidth)));
+    // Buckets sit on fixed multiples of `bucketMs` in absolute time, not
+    // on fractions of the window. Their size depends only on the zoom, so
+    // panning slides the same bars along instead of regrouping segments
+    // into different columns every frame — which is what made the bars
+    // flicker between sizes while scrolling.
+    const bucketMs = span / Math.max(60, Math.min(600, Math.round(v ? cssHeight : cssWidth)));
+    const firstK = Math.floor(win.start / bucketMs);
+    const buckets = Math.ceil(win.end / bucketMs) - firstK;
     const peaks = new Float64Array(buckets);
+    // Scaled against the loudest score of the whole day, not just what is
+    // in view, so a bar keeps its length as the window pans past peaks.
     let max = 0;
     for (const m of this._recordings) {
       if (!m.score) continue;
+      if (m.score > max) max = m.score;
       if (m.end <= win.start || m.start >= win.end) continue;
-      const from = Math.max(0, Math.floor(((m.start - win.start) / span) * buckets));
-      const to = Math.min(buckets - 1, Math.floor(((m.end - win.start) / span) * buckets));
+      const from = Math.max(0, Math.floor(m.start / bucketMs) - firstK);
+      const to = Math.min(buckets - 1, Math.floor(m.end / bucketMs) - firstK);
       for (let i = from; i <= to; i++) {
         if (m.score > peaks[i]) peaks[i] = m.score;
       }
-      if (m.score > max) max = m.score;
     }
     if (!max) return;
 
     ctx.fillStyle =
       getComputedStyle(this._trackEl).getPropertyValue("--frigate-timeline-motion").trim() ||
       "rgba(255, 255, 255, 0.62)";
-    const columnWidth = len / buckets;
+    const columnWidth = (bucketMs / span) * len;
     const barWidth = Math.max(ratio, columnWidth - ratio * 0.4);
     const radius = Math.min(ratio, barWidth / 2);
     const rounded = typeof ctx.roundRect === "function";
-    // Scaled against the loudest score *in view*, so zooming into a quiet
-    // stretch opens its detail up instead of flattening it against some
-    // unrelated peak elsewhere in the day. Square-rooted because the scores
-    // are wildly uneven — 1 to over a thousand on these cameras — and a
-    // linear scale leaves everything ordinary invisible.
+    // Square-rooted because the scores are wildly uneven — 1 to over a
+    // thousand on these cameras — and a linear scale leaves everything
+    // ordinary invisible.
     if (rounded) ctx.beginPath();
     for (let i = 0; i < buckets; i++) {
       if (!peaks[i]) continue;
@@ -3466,7 +3473,7 @@ class FrigateTimelineCard extends HTMLElement {
         ratio * 2,
         (Math.sqrt(peaks[i] / max) * MOTION_MAX_HEIGHT_PCT * thick) / 100
       );
-      const along = i * columnWidth;
+      const along = (((firstK + i) * bucketMs - win.start) / span) * len;
       const across = (thick - barHeight) / 2;
       const r = v ? [across, len - along - barWidth, barHeight, barWidth] : [along, across, barWidth, barHeight];
       if (rounded) ctx.roundRect(...r, radius);
@@ -3536,10 +3543,7 @@ class FrigateTimelineCard extends HTMLElement {
     for (let t = first.getTime(); t < win.end; t += stepMs) {
       const pct = ((t - win.start) / span) * 100;
       const d = new Date(t);
-      let h = d.getHours();
-      const ampm = h >= 12 ? "PM" : "AM";
-      h = h % 12 || 12;
-      const label = stepMs < 3600000 ? `${h}:${pad2(d.getMinutes())}` : `${h}:${pad2(d.getMinutes())} ${ampm}`;
+      const label = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
       ticksHtml += `<span class="ftc-tick" style="${this._posProp}:${pct}%">${label}</span>`;
     }
     this._ticksEl.innerHTML = ticksHtml;
