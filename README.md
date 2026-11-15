@@ -113,3 +113,11 @@ Each still shows Frigate's object icons (person, car, cat, …) while that kind 
 A red dot pulses while the camera sees motion (`binary_sensor.<camera>_motion`). While Frigate is tracking a moving object on a camera (`sensor.<camera>_<label>_active_count` above 0; parked objects don't count), its tile switches from the still to a live stream, like Frigate's own grid, and back to the still 10 seconds after the last one stops or leaves. Tiles use each camera's `<camera>_sub` go2rtc stream; set `tile_stream: main` on a camera that has no sub stream.
 
 Every key other than `cameras` and `refresh_seconds` is passed to the timeline card a camera opens in.
+
+A view's back/home button can go through the card instead of navigating straight away: with an open camera it returns to the grid, otherwise it goes to the given path.
+
+```yaml
+tap_action:
+  action: fire-dom-event
+  frigate_cameras_back: /dashboard-home
+```

@@ -165,10 +165,6 @@ const ICON_VOLUME_OFF =
   '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.42.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.8L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
 const ICON_FULLSCREEN =
   '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
-const ICON_CHEVRON_UP =
-  '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 8l-6 6 1.41 1.41L12 10.83l4.59 4.58L18 14z"/></svg>';
-const ICON_CHEVRON_DOWN =
-  '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 16l6-6-1.41-1.41L12 13.17 7.41 8.59 6 10z"/></svg>';
 
 // Romanian + English UI strings, auto-selected from HA's own configured
 // locale (`hass.locale.language`, falling back to `hass.language`) — no
@@ -178,7 +174,6 @@ const ICON_CHEVRON_DOWN =
 const I18N = {
   ro: {
     today: "Astăzi",
-    toggleTimeline: "Ascunde/afișează timeline",
     playPause: "Redare/Pauză",
     muteUnmute: "Mut/Sunet",
     fullscreen: "Ecran complet",
@@ -197,7 +192,6 @@ const I18N = {
   },
   en: {
     today: "Today",
-    toggleTimeline: "Hide/show timeline",
     playPause: "Play/Pause",
     muteUnmute: "Mute/Unmute",
     fullscreen: "Fullscreen",
@@ -271,7 +265,6 @@ class FrigateTimelineCard extends HTMLElement {
    * out English-default and need a refresh the first time the real
    * language becomes available. */
   _applyI18n() {
-    if (this._timelineToggleBtn) this._timelineToggleBtn.title = this._t("toggleTimeline");
     if (this._playBtnEl) this._playBtnEl.title = this._t("playPause");
     if (this._muteBtnEl) this._muteBtnEl.title = this._t("muteUnmute");
     if (this._fsBtnEl) this._fsBtnEl.title = this._t("fullscreen");
@@ -1940,21 +1933,9 @@ class FrigateTimelineCard extends HTMLElement {
     this._fsBtnEl = fsBtn;
     this._liveBtnEl = liveBtn;
 
-    // Timeline show/hide lives next to the day selector, not with the
-    // playback controls — it toggles the day-nav row's own sibling
-    // section, so it reads more naturally grouped with day navigation.
-    const daynav = this.querySelector(".ftc-daynav");
-    const timelineToggleBtn = document.createElement("button");
-    timelineToggleBtn.className = "ftc-navbtn";
-    timelineToggleBtn.innerHTML = ICON_CHEVRON_UP;
-    timelineToggleBtn.title = this._t("toggleTimeline");
-    timelineToggleBtn.addEventListener("click", () => this._setTimelineHidden(!this._timelineHidden, true));
-    daynav?.appendChild(timelineToggleBtn);
-    this._timelineToggleBtn = timelineToggleBtn;
   }
 
-  /** Shared by the manual chevron button and the auto-hide timer, so both
-   * keep the icon and `.ftc-timeline` display in sync with each other.
+  /** Shows/hides `.ftc-timeline` for the auto-hide timer and its wake-up.
    * `userInitiated` distinguishes an explicit tap (which should cancel any
    * pending auto-hide, so it doesn't immediately re-hide what the user just
    * asked to see) from the timer's own call. */
@@ -1962,7 +1943,6 @@ class FrigateTimelineCard extends HTMLElement {
     if (!this._timelineEl) return;
     this._timelineHidden = hidden;
     this._timelineEl.style.display = hidden ? "none" : "";
-    if (this._timelineToggleBtn) this._timelineToggleBtn.innerHTML = hidden ? ICON_CHEVRON_DOWN : ICON_CHEVRON_UP;
     if (userInitiated) this._scheduleAutoHide();
     // Both debts from not working while collapsed come due here: the motion
     // layer was never fetched, and any render that fell due was skipped.
@@ -4002,12 +3982,25 @@ class FrigateCamerasCard extends HTMLElement {
       if (this._onScreen) this._refreshStills();
     });
     this._observer.observe(this);
+    window.addEventListener("ll-custom", this._onBack);
   }
 
   disconnectedCallback() {
     clearInterval(this._timer);
     this._observer?.disconnect();
+    window.removeEventListener("ll-custom", this._onBack);
   }
+
+  /** A view's back/home button can target this card with
+   * `tap_action: {action: fire-dom-event, frigate_cameras_back: <path>}`:
+   * an open camera goes back to the grid, the grid navigates to <path>. */
+  _onBack = (e) => {
+    const path = e.detail?.frigate_cameras_back;
+    if (path === undefined) return;
+    if (this._timeline) return this._showGrid();
+    history.pushState(null, "", path);
+    window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: false } }));
+  };
 
   _clearTileTimers() {
     this.querySelectorAll(".fcc-cam").forEach((btn) => clearTimeout(btn._liveOffTimer));
