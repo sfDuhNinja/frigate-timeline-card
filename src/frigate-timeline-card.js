@@ -93,6 +93,14 @@ const LIVE_WEDGE_DOWNGRADE_THRESHOLD = 3;
 const MAX_LIVE_LAG_SEC = 60;
 /** Minimum spacing between live-edge catch-up passes. */
 const CATCH_UP_INTERVAL_MS = 1000;
+/** Live-edge catch-up starts only once the playhead is this far behind and
+ * stops once it is back within the lower bound. A single 1s threshold sat
+ * inside the buffer a player keeps anyway (measured holding at 0.99s on
+ * Chrome, with an underrun every ~12s; Safari keeps more), so the rate was
+ * being nudged up permanently. Raise both if a browser still speeds up at
+ * rest; lower them for less latency. */
+const CATCH_UP_START_SEC = 3;
+const CATCH_UP_STOP_SEC = 1.5;
 /** Tallest a motion bar gets, as a percentage of the track's height. Kept
  * well short of full so the activity bands behind it stay readable. */
 const MOTION_MAX_HEIGHT_PCT = 62;
@@ -509,6 +517,11 @@ class FrigateTimelineCard extends HTMLElement {
     if (this._config?.live_source !== "frigate") {
       this._zoomEl.innerHTML = "";
       this._streamEl = null;
+    } else if (this._streamEl?.tagName === "VIDEO") {
+      // Closing the socket alone left the element playing: its clock ran on
+      // past the buffer and the decoder stayed allocated for every card out
+      // of sight. Autoplay starts it again when the next source attaches.
+      this._streamEl.pause();
     }
   }
 
@@ -2308,6 +2321,7 @@ class FrigateTimelineCard extends HTMLElement {
         // Infinity duration a live stream should report anyway is what lets
         // the trim itself succeed.
         let lastCatchUpAt = 0;
+        let catchingUp = false;
         const catchUpToLiveEdge = () => {
           if (cancelled || token !== this._liveToken || !sourceBuffer) return;
           // `updateend` fires on every appended fragment — measured at
@@ -2349,7 +2363,9 @@ class FrigateTimelineCard extends HTMLElement {
             // to absorb instead of being yanked out in one frame. Anything
             // sharper is visible on screen and buys nothing on a live view.
             const gap = end - video.currentTime;
-            const rate = gap > 1 ? Math.min(1 + (gap - 1) * 0.25, 1.5) : 1;
+            if (gap > CATCH_UP_START_SEC) catchingUp = true;
+            else if (gap < CATCH_UP_STOP_SEC) catchingUp = false;
+            const rate = catchingUp ? Math.min(1 + (gap - 1) * 0.25, 1.5) : 1;
             // Writing playbackRate is not free — it re-times the audio and
             // can nudge the decoder — so leave it alone when it already
             // holds the value we want.
