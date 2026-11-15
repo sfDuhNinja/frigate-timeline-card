@@ -114,7 +114,7 @@ A red dot pulses while the camera sees motion (`binary_sensor.<camera>_motion`).
 
 Every key other than `cameras` and `refresh_seconds` is passed to the timeline card a camera opens in.
 
-For a view footer, `custom:frigate-cameras-back-card` is a markdown button that reads `back_label` while a camera is open (tap returns to the grid) and `label` otherwise (tap goes to `navigation_path`):
+For a view footer, `custom:frigate-cameras-back-card` is a markdown button that reads `back_label` while a camera is open (tap returns to the grid) and `label` otherwise (tap goes to `navigation_path`). With one on the view, the card drops its own top-left back button:
 
 ```yaml
 footer:

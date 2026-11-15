@@ -4147,13 +4147,17 @@ class FrigateCamerasCard extends HTMLElement {
     const card = document.createElement("frigate-timeline-card");
     card.setConfig({ ...shared, frigate_camera: cam.camera, camera_entity: cam.entity });
     if (this._hass) card.hass = this._hass;
-    const back = document.createElement("button");
-    back.className = "fcc-back";
-    back.innerHTML = "<span>‹</span>";
-    back.append(cam.name || cam.camera);
-    back.addEventListener("click", () => this._showGrid());
     const style = this.querySelector("style");
-    this.replaceChildren(back, card, style);
+    this.replaceChildren(card, style);
+    // A frigate-cameras-back-card on the view already does "back".
+    if (!backCards) {
+      const back = document.createElement("button");
+      back.className = "fcc-back";
+      back.innerHTML = "<span>‹</span>";
+      back.append(cam.name || cam.camera);
+      back.addEventListener("click", () => this._showGrid());
+      this.prepend(back);
+    }
     this._timeline = card;
     setCamerasOpen(true);
   }
@@ -4161,6 +4165,7 @@ class FrigateCamerasCard extends HTMLElement {
 
 /** Whether a frigate-cameras-card has a camera open, for the back button. */
 let camerasOpen = false;
+let backCards = 0; // connected frigate-cameras-back-cards
 function setCamerasOpen(open) {
   if (open === camerasOpen) return;
   camerasOpen = open;
@@ -4182,6 +4187,7 @@ class FrigateCamerasBackCard extends HTMLElement {
   }
 
   connectedCallback() {
+    backCards++;
     window.addEventListener("frigate-cameras-open-changed", this._render);
     this.onclick = () =>
       window.dispatchEvent(
@@ -4192,6 +4198,7 @@ class FrigateCamerasBackCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    backCards--;
     window.removeEventListener("frigate-cameras-open-changed", this._render);
   }
 
