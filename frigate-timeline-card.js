@@ -4042,7 +4042,7 @@ class FrigateCamerasCard extends HTMLElement {
           frigate-cameras-card .fcc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         frigate-cameras-card .fcc-cam {
-          position: relative; display: block; width: 100%; padding: 0; border: none; cursor: pointer;
+          position: relative; display: block; width: 100%; padding: 0; border: none; cursor: pointer; font: inherit;
           aspect-ratio: 16 / 9; background: #000; overflow: hidden;
           border-radius: var(--ha-card-border-radius, 12px);
         }
@@ -4053,7 +4053,7 @@ class FrigateCamerasCard extends HTMLElement {
           position: absolute; inset: 0; pointer-events: none;
         }
         frigate-cameras-card .fcc-badges {
-          position: absolute; top: 8px; right: 8px; display: flex; align-items: center; gap: 6px; z-index: 1;
+          position: absolute; top: 8px; right: 8px; height: 30px; display: flex; align-items: center; gap: 6px; z-index: 1;
         }
         frigate-cameras-card .fcc-objects { display: flex; gap: 6px; }
         frigate-cameras-card .fcc-motion {
@@ -4069,8 +4069,12 @@ class FrigateCamerasCard extends HTMLElement {
           --mdc-icon-size: 18px;
         }
         frigate-cameras-card .fcc-name {
-          z-index: 1; position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 10px;
-          background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 12px;
+          z-index: 1; position: absolute; left: 8px; bottom: 8px; padding: 4px 10px; border-radius: 999px;
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+          font-size: 13px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.2; color: #fff;
+          /* iOS-style frosted pill: blur what's behind rather than covering it. */
+          background: rgba(30, 30, 30, 0.45);
+          -webkit-backdrop-filter: blur(16px) saturate(180%); backdrop-filter: blur(16px) saturate(180%);
         }
         frigate-cameras-card .fcc-back {
           display: flex; align-items: center; gap: 4px; margin: 0 0 6px; padding: 4px 8px 4px 2px;
