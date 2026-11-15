@@ -415,6 +415,7 @@ class FrigateTimelineCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._stopFling();
     if (this._tickInterval) {
       clearInterval(this._tickInterval);
       this._tickInterval = null;
@@ -907,6 +908,7 @@ class FrigateTimelineCard extends HTMLElement {
    * mostly as "what just happened". Called on load, on a day change, and on
    * an explicit Live press. */
   _resetZoom() {
+    this._stopFling();
     this._windowHours = this._defaultZoomHours();
     this._recenterToNow();
   }
@@ -1469,8 +1471,12 @@ class FrigateTimelineCard extends HTMLElement {
       this._trackEl.querySelector(".ftc-scrub")?.remove();
     };
 
+    // Recent pan positions, for the fling's release velocity.
+    let samples = [];
     this._trackEl.addEventListener("pointerdown", (e) => {
+      this._stopFling();
       if (this._pinchActive) return;
+      samples = [];
       dragging = true;
       panned = false;
       startX = this._axisPos(e);
@@ -1491,15 +1497,25 @@ class FrigateTimelineCard extends HTMLElement {
         const msPerPx = (win.end - win.start) / this._trackLen();
         this._centerMs = startCenterMs - dx * msPerPx;
         this._scheduleRender();
+        const now = performance.now();
+        samples.push({ dx, t: now });
+        while (samples.length > 2 && now - samples[0].t > 100) samples.shift();
         return;
       }
       const frac = fracFromEvent(e);
       if (frac != null) showScrub(frac);
     });
-    const stopDrag = () => {
+    const stopDrag = (e) => {
       dragging = false;
       clearScrub();
-      if (panned) this._suppressNextClick = true;
+      if (!panned) return;
+      this._suppressNextClick = true;
+      // Touch release keeps the strip moving, like iOS scroll views.
+      const a = samples[0];
+      const b = samples[samples.length - 1];
+      if (e.type !== "pointerup" || e.pointerType === "mouse" || !a || b.t - a.t < 10) return;
+      if (performance.now() - b.t > 80) return; // finger stopped before lifting
+      this._fling((b.dx - a.dx) / (b.t - a.t));
     };
     this._trackEl.addEventListener("pointerup", stopDrag);
     this._trackEl.addEventListener("pointercancel", stopDrag);
@@ -1528,6 +1544,7 @@ class FrigateTimelineCard extends HTMLElement {
       "wheel",
       (e) => {
         e.preventDefault();
+        this._stopFling();
         const frac = this._fracFromPos(this._axisPos(e));
         if (frac == null) return;
         const win = this._currentWindow();
@@ -1549,6 +1566,7 @@ class FrigateTimelineCard extends HTMLElement {
       (e) => {
         if (e.touches.length === 2) {
           e.preventDefault();
+          this._stopFling();
           this._pinchActive = true;
           dragging = false;
           clearScrub();
@@ -1579,6 +1597,36 @@ class FrigateTimelineCard extends HTMLElement {
         this._pinchActive = false;
       }
     });
+  }
+
+  /** Momentum after a touch pan. `v` is px/ms along the strip; faster
+   * swipes are boosted more than linearly, so a quick flick travels far
+   * while a slow release just settles. Friction decays it to a stop, and
+   * it ends early at either end of the day. */
+  _fling(v) {
+    this._stopFling();
+    v *= 1 + Math.min(Math.abs(v), 4) * 0.6; // ponytail: acceleration curve, tune by feel
+    let last = performance.now();
+    const step = (now) => {
+      const dt = Math.min(now - last, 50);
+      last = now;
+      const win = this._currentWindow();
+      const msPerPx = (win.end - win.start) / this._trackLen();
+      const before = win.start;
+      this._centerMs = (win.start + win.end) / 2 - v * dt * msPerPx;
+      const after = this._currentWindow();
+      this._centerMs = (after.start + after.end) / 2; // no overshoot stored past the edge
+      this._scheduleRender();
+      v *= Math.pow(0.995, dt); // ~0.92 per 60Hz frame
+      if (Math.abs(v) < 0.02 || after.start === before) return (this._flingRaf = null);
+      this._flingRaf = requestAnimationFrame(step);
+    };
+    this._flingRaf = requestAnimationFrame(step);
+  }
+
+  _stopFling() {
+    if (this._flingRaf) cancelAnimationFrame(this._flingRaf);
+    this._flingRaf = null;
   }
 
   // ─── Zoom pe imagine ─────────────────────────────────────────────────
