@@ -3833,6 +3833,13 @@ class FrigateTimelineCardEditor extends HTMLElement {
  *   # every other key (frigate_url, live_source, orientation, …) is passed
  *   # through to the frigate-timeline-card the tapped camera opens in.
  */
+/** Frigate labels to the icons its own UI marks them with. */
+const OBJECT_ICONS = {
+  person: "mdi:account", car: "mdi:car", cat: "mdi:cat", dog: "mdi:dog", bird: "mdi:bird",
+  motorcycle: "mdi:motorbike", bicycle: "mdi:bicycle", bus: "mdi:bus", truck: "mdi:truck",
+  waste_bin: "mdi:delete", robot_lawnmower: "mdi:robot-mower", package: "mdi:package-variant-closed",
+};
+
 class FrigateCamerasCard extends HTMLElement {
   setConfig(config) {
     if (!Array.isArray(config.cameras) || !config.cameras.length) {
@@ -3849,7 +3856,50 @@ class FrigateCamerasCard extends HTMLElement {
     const first = !this._hass;
     this._hass = hass;
     if (this._timeline) this._timeline.hass = hass;
-    else if (first) this._refreshStills();
+    else {
+      if (first) this._refreshStills();
+      this._updateObjects();
+    }
+  }
+
+  /** The Frigate integration's `binary_sensor.<camera>_<label>_occupancy`
+   * entities for one camera, found once by name. Matched with any prefix
+   * because a few of them come out as `<other>_<camera>_<label>_…`. */
+  _occupancyEntities(cam) {
+    this._occupancy ??= {};
+    if (!this._occupancy[cam.entity]) {
+      const objectId = cam.entity.split(".")[1];
+      const re = new RegExp(`^binary_sensor\\.(?:.*_)?${objectId}_(.+)_occupancy$`);
+      this._occupancy[cam.entity] = Object.keys(this._hass.states)
+        .map((id) => [id, id.match(re)?.[1]])
+        .filter(([, label]) => label && label !== "all");
+    }
+    return this._occupancy[cam.entity];
+  }
+
+  /** Frigate's object icons: one per kind of object currently in view. */
+  _updateObjects() {
+    if (!this._hass) return;
+    this.querySelectorAll(".fcc-cam").forEach((btn) => {
+      const cam = this._config.cameras[Number(btn.dataset.i)];
+      const labels = this._occupancyEntities(cam)
+        .filter(([id]) => this._hass.states[id]?.state === "on")
+        .map(([, label]) => label);
+      const key = labels.join(",");
+      if (btn.dataset.objects === key) return;
+      btn.dataset.objects = key;
+      const box = btn.querySelector(".fcc-objects");
+      box.replaceChildren(
+        ...labels.map((label) => {
+          const el = document.createElement("span");
+          el.title = label.replace(/_/g, " ");
+          const icon = document.createElement("ha-icon");
+          icon.icon = OBJECT_ICONS[label] || "mdi:shape";
+          el.appendChild(icon);
+          return el;
+        })
+      );
+    });
   }
 
   getCardSize() {
@@ -3882,6 +3932,7 @@ class FrigateCamerasCard extends HTMLElement {
           .map(
             (c, i) => `<button class="fcc-cam" data-i="${i}">
               <img alt="">
+              <span class="fcc-objects"></span>
               ${c.name ? `<span class="fcc-name"></span>` : ""}
             </button>`
           )
@@ -3903,6 +3954,15 @@ class FrigateCamerasCard extends HTMLElement {
         frigate-cameras-card .fcc-cam img {
           width: 100%; height: 100%; object-fit: cover; display: block;
         }
+        frigate-cameras-card .fcc-objects {
+          position: absolute; top: 8px; left: 8px; display: flex; gap: 6px;
+        }
+        frigate-cameras-card .fcc-objects span {
+          display: flex; align-items: center; justify-content: center;
+          width: 30px; height: 30px; border-radius: 50%;
+          background: rgba(140, 140, 160, 0.75); color: #fff;
+          --mdc-icon-size: 18px;
+        }
         frigate-cameras-card .fcc-name {
           position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 10px;
           background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 12px;
@@ -3922,6 +3982,7 @@ class FrigateCamerasCard extends HTMLElement {
       btn.addEventListener("click", () => this._open(cam));
     });
     this._refreshStills();
+    this._updateObjects();
   }
 
   _refreshStills() {

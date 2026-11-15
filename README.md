@@ -108,4 +108,6 @@ cameras:
     entity: camera.camera_garaj
 ```
 
+Each still shows Frigate's object icons (person, car, cat, …) while that kind of object is in view, read from the Frigate integration's `binary_sensor.<camera>_<label>_occupancy` entities.
+
 Every key other than `cameras` and `refresh_seconds` is passed to the timeline card a camera opens in.
