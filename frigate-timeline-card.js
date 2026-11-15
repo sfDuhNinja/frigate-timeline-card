@@ -182,8 +182,6 @@ const ICON_CHEVRON_DOWN =
 // falls back to English.
 const I18N = {
   ro: {
-    prevDay: "Ziua anterioară",
-    nextDay: "Ziua următoare",
     today: "Astăzi",
     toggleTimeline: "Ascunde/afișează timeline",
     playPause: "Redare/Pauză",
@@ -203,8 +201,6 @@ const I18N = {
     edStream: "Stream",
   },
   en: {
-    prevDay: "Previous day",
-    nextDay: "Next day",
     today: "Today",
     toggleTimeline: "Hide/show timeline",
     playPause: "Play/Pause",
@@ -280,8 +276,6 @@ class FrigateTimelineCard extends HTMLElement {
    * out English-default and need a refresh the first time the real
    * language becomes available. */
   _applyI18n() {
-    if (this._prevDayBtnEl) this._prevDayBtnEl.title = this._t("prevDay");
-    if (this._nextDayBtnEl) this._nextDayBtnEl.title = this._t("nextDay");
     if (this._timelineToggleBtn) this._timelineToggleBtn.title = this._t("toggleTimeline");
     if (this._playBtnEl) this._playBtnEl.title = this._t("playPause");
     if (this._muteBtnEl) this._muteBtnEl.title = this._t("muteUnmute");
@@ -582,9 +576,7 @@ class FrigateTimelineCard extends HTMLElement {
         <div class="ftc-stage"><div class="ftc-zoom"></div></div>
         <div class="ftc-toolbar">
           <div class="ftc-daynav">
-            <button class="ftc-navbtn" data-dir="-1" title="Previous day">‹</button>
-            <span class="ftc-daylabel"></span>
-            <button class="ftc-navbtn" data-dir="1" title="Next day">›</button>
+            <label class="ftc-daypick"><span class="ftc-daylabel"></span><input type="date" class="ftc-dateinput"></label>
           </div>
           <div class="ftc-controlbar"></div>
         </div>
@@ -674,7 +666,17 @@ class FrigateTimelineCard extends HTMLElement {
           display: flex; align-items: center; gap: 6px;
           font-size: 13px; color: var(--primary-text-color, #fff);
         }
-        frigate-timeline-card .ftc-daylabel { padding: 0 4px; min-width: 60px; text-align: center; }
+        frigate-timeline-card .ftc-daypick {
+          position: relative; display: inline-flex; align-items: center; cursor: pointer;
+          padding: 3px 8px; border-radius: 6px;
+        }
+        frigate-timeline-card .ftc-daypick:hover { background: rgba(255, 255, 255, 0.08); }
+        frigate-timeline-card .ftc-daylabel { min-width: 60px; text-align: center; }
+        frigate-timeline-card .ftc-daylabel::after { content: " ▾"; opacity: 0.6; }
+        frigate-timeline-card .ftc-dateinput {
+          position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0;
+          opacity: 0; border: 0; cursor: pointer; color-scheme: dark;
+        }
         frigate-timeline-card .ftc-navbtn {
           background: none; border: none; color: inherit; font-size: 16px; line-height: 1;
           cursor: pointer; padding: 3px 9px; border-radius: 6px;
@@ -830,35 +832,33 @@ class FrigateTimelineCard extends HTMLElement {
     this._wireNowLineScrub();
     this._wireStageZoom();
     this._wireAutoHide();
-    this._prevDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="-1"]');
-    this._nextDayBtnEl = this.querySelector('.ftc-navbtn[data-dir="1"]');
-    // `[data-dir]` is load-bearing, not decoration. The timeline's
-    // collapse chevron is styled as a `.ftc-navbtn` too and is appended to
-    // this same row by _buildControlBar(), which runs just above — so a
-    // bare `.ftc-navbtn` selector picked it up and gave it the day-shift
-    // handler on top of its own. `Number(undefined)` is NaN, which walks
-    // straight through shiftDayKey into `new Date(y, m - 1, NaN)` and comes
-    // back out as the string "NaN-NaN-NaN". Every tap on the chevron then
-    // refetched with `after=NaN&before=NaN`, which Home Assistant rejects
-    // and Frigate never sees, leaving the timeline blank until the day
-    // changed.
-    this.querySelectorAll(".ftc-navbtn[data-dir]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        this._dayKey = shiftDayKey(this._dayKey, Number(btn.dataset.dir));
-        this._resetZoom();
-        this._ensureData();
-        this._updateDayNavState();
-      });
+    // Native date input: iOS/Safari and Chrome open their own month
+    // calendar, no picker code to ship. It sits invisible over the label;
+    // showPicker() covers desktop browsers, where a click alone only
+    // focuses the input's text segments.
+    this._dateInputEl = this.querySelector(".ftc-dateinput");
+    this._dateInputEl.addEventListener("click", () => {
+      try { this._dateInputEl.showPicker(); } catch (_) {}
+    });
+    this._dateInputEl.addEventListener("change", () => {
+      const v = this._dateInputEl.value;
+      if (!v || v > todayKey() || v === this._dayKey) return this._updateDayNavState();
+      this._dayKey = v;
+      this._resetZoom();
+      this._ensureData();
+      this._updateDayNavState();
     });
     this._updateDayNavState();
     this._applyI18n();
     this._showLive();
   }
 
-  /** Disables "next day" once the viewed day reaches today — there's never
-   * any future data, so stepping past today would just show an empty day. */
+  /** Keeps the calendar on the viewed day, with future days greyed out —
+   * there's never any data there. */
   _updateDayNavState() {
-    if (this._nextDayBtnEl) this._nextDayBtnEl.disabled = this._dayKey >= todayKey();
+    if (!this._dateInputEl) return;
+    this._dateInputEl.max = todayKey();
+    this._dateInputEl.value = this._dayKey;
   }
 
   // ─── Zoom / pan ──────────────────────────────────────────────────────
@@ -4027,7 +4027,7 @@ class FrigateCamerasCard extends HTMLElement {
           .map(
             (c, i) => `<button class="fcc-cam" data-i="${i}">
               <img alt="">
-              <span class="fcc-badges"><span class="fcc-objects"></span><span class="fcc-motion" hidden></span></span>
+              <span class="fcc-badges"><span class="fcc-objects"></span></span><span class="fcc-motion" hidden></span>
               ${c.name ? `<span class="fcc-name"></span>` : ""}
             </button>`
           )
@@ -4053,20 +4053,21 @@ class FrigateCamerasCard extends HTMLElement {
           position: absolute; inset: 0; pointer-events: none;
         }
         frigate-cameras-card .fcc-badges {
-          position: absolute; top: 8px; right: 8px; height: 30px; display: flex; align-items: center; gap: 6px; z-index: 1;
+          position: absolute; top: max(6px, calc(var(--ha-card-border-radius, 12px) - 12px)); right: calc(var(--ha-card-border-radius, 12px) + 10px); z-index: 1;
         }
-        frigate-cameras-card .fcc-objects { display: flex; gap: 6px; }
+        frigate-cameras-card .fcc-objects { display: flex; gap: 4px; }
         frigate-cameras-card .fcc-motion {
-          width: 10px; height: 10px; margin: 0 4px; border-radius: 50%; background: #ef4444;
+          position: absolute; z-index: 1; top: calc(var(--ha-card-border-radius, 12px) - 3.5px); right: calc(var(--ha-card-border-radius, 12px) - 3.5px);
+          width: 7px; height: 7px; border-radius: 50%; background: #ef4444;
           box-shadow: 0 0 4px rgba(0, 0, 0, 0.6); animation: fcc-pulse 1.6s ease-in-out infinite;
         }
         frigate-cameras-card .fcc-motion[hidden] { display: none; }
         @keyframes fcc-pulse { 50% { opacity: 0.35; } }
         frigate-cameras-card .fcc-objects span {
           display: flex; align-items: center; justify-content: center;
-          width: 30px; height: 30px; border-radius: 50%;
+          width: 24px; height: 24px; border-radius: 50%;
           background: rgba(0, 0, 0, 0.6); color: #fff;
-          --mdc-icon-size: 18px;
+          --mdc-icon-size: 15px;
         }
         frigate-cameras-card .fcc-name {
           z-index: 1; position: absolute; left: 8px; bottom: 8px; padding: 4px 10px; border-radius: 999px;
