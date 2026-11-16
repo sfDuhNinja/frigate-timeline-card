@@ -713,9 +713,6 @@ class FrigateTimelineCard extends HTMLElement {
           overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
         }
         frigate-timeline-card .ftc-scroller::-webkit-scrollbar { display: none; }
-        /* With the scroller up, a swipe that starts on the playhead scrolls
-           too; a tap still seeks through the scroller. */
-        frigate-timeline-card.ftc-scrolling .ftc-now-line { pointer-events: none; }
         frigate-timeline-card .ftc-scroller > div { width: 1px; height: 1px; }
         frigate-timeline-card:not(.ftc-vertical) .ftc-scroller { touch-action: pan-x; }
         frigate-timeline-card.ftc-vertical .ftc-scroller { touch-action: pan-y; }
@@ -1743,7 +1740,6 @@ class FrigateTimelineCard extends HTMLElement {
     if (!el) return;
     const zoomed = this._windowHours && this._windowHours < 24;
     el.style.display = zoomed ? "" : "none";
-    this.classList.toggle("ftc-scrolling", !!zoomed);
     if (!zoomed) return;
     const t = this._trackEl;
     Object.assign(el.style, {
