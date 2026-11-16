@@ -824,9 +824,8 @@ class FrigateTimelineCard extends HTMLElement {
           frigate-timeline-card.ftc-vertical .ftc-timeline {
             grid-column: 1; grid-row: auto; width: auto; height: max(260px, 40vh);
           }
-          /* Room at the bottom for a swipe card's pagination dots. */
-          frigate-timeline-card.ftc-vertical .ftc-trackwrap { left: 64px; right: 10px; width: auto; bottom: 30px; }
-          frigate-timeline-card.ftc-vertical .ftc-ticks { right: auto; width: 50px; bottom: 30px; }
+          frigate-timeline-card.ftc-vertical .ftc-trackwrap { left: 64px; right: 10px; width: auto; top: 10px; bottom: 10px; }
+          frigate-timeline-card.ftc-vertical .ftc-ticks { right: auto; width: 50px; top: 10px; bottom: 10px; }
         }
         frigate-timeline-card.ftc-live-only .ftc-toolbar,
         frigate-timeline-card.ftc-live-only .ftc-timeline { display: none; }
