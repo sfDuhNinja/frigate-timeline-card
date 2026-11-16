@@ -788,12 +788,12 @@ class FrigateTimelineCard extends HTMLElement {
           width: calc(var(--ftc-vtrack-w) + 64px);
         }
         frigate-timeline-card.ftc-vertical .ftc-trackwrap {
-          position: absolute; top: 14px; bottom: 14px; right: 8px; width: var(--ftc-vtrack-w);
+          position: absolute; top: 8px; bottom: 8px; right: 8px; width: var(--ftc-vtrack-w);
         }
         frigate-timeline-card.ftc-vertical .ftc-track { height: 100%; }
         frigate-timeline-card.ftc-vertical .ftc-band { top: auto; bottom: auto; left: 0; right: 0; }
         frigate-timeline-card.ftc-vertical .ftc-ticks {
-          position: absolute; top: 14px; bottom: 14px; left: 0; right: calc(var(--ftc-vtrack-w) + 14px);
+          position: absolute; top: 8px; bottom: 8px; left: 0; right: calc(var(--ftc-vtrack-w) + 14px);
           height: auto; margin: 0;
         }
         frigate-timeline-card.ftc-vertical .ftc-tick { right: 0; transform: translateY(50%); }
@@ -1736,16 +1736,19 @@ class FrigateTimelineCard extends HTMLElement {
     const zoomed = this._windowHours && this._windowHours < 24;
     el.style.display = zoomed ? "" : "none";
     if (!zoomed) return;
+    // Hands off while a finger or momentum is moving it: on iOS, resizing
+    // the content mid-scroll (today's grows every render) makes it stutter.
+    if (performance.now() - (this._userScrollAt || 0) < 250) return;
     const t = this._trackEl;
-    Object.assign(el.style, {
-      left: `${t.offsetLeft}px`, top: `${t.offsetTop}px`,
-      width: `${t.offsetWidth}px`, height: `${t.offsetHeight}px`,
-    });
+    const set = (style, key, v) => { if (style[key] !== v) style[key] = v; };
+    set(el.style, "left", `${t.offsetLeft}px`);
+    set(el.style, "top", `${t.offsetTop}px`);
+    set(el.style, "width", `${t.offsetWidth}px`);
+    set(el.style, "height", `${t.offsetHeight}px`);
     const span = win.end - win.start;
     const day = this._dayRange(span);
     const msPerPx = span / this._trackLen();
-    el.firstChild.style[this._vertical ? "height" : "width"] = `${(day.end - day.start) / msPerPx}px`;
-    if (performance.now() - (this._userScrollAt || 0) < 250) return;
+    set(el.firstChild.style, this._vertical ? "height" : "width", `${Math.round((day.end - day.start) / msPerPx)}px`);
     const pos = (this._vertical ? day.end - win.end : win.start - day.start) / msPerPx;
     const cur = this._vertical ? el.scrollTop : el.scrollLeft;
     if (Math.abs(cur - pos) < 1) return;
