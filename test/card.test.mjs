@@ -1,4 +1,4 @@
-// Run with: node --test test/
+// Run with: node --test test/card.test.mjs
 // Covers the date, window and scroll arithmetic plus a few regressions that
 // have bitten before. Nothing here needs a browser.
 process.env.TZ = "Europe/Bucharest"; // has a DST change, which is the point

@@ -86,7 +86,7 @@ If a camera drops intermittently, check what it is actually streaming: `frigate_
 
 ## Development
 
-Edit `src/frigate-timeline-card.js`, then run `./build.sh` to produce the installed file. The bundled hls.js only runs on a browser that can't play HLS itself (Safari never needs it). `node --test test/` checks the day, zoom and scroll arithmetic and a few past regressions; CI runs it on every push.
+Edit `src/frigate-timeline-card.js`, then run `./build.sh` to produce the installed file. The bundled hls.js only runs on a browser that can't play HLS itself (Safari never needs it). `node --test test/card.test.mjs` checks the day, zoom and scroll arithmetic and a few past regressions; CI runs it on every push.
 
 ## Why this exists
 

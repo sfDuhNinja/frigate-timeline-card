@@ -13,6 +13,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node --test test/
+      - run: node --test test/card.test.mjs
       - name: Built file matches the source
         run: ./build.sh && git diff --exit-code frigate-timeline-card.js
