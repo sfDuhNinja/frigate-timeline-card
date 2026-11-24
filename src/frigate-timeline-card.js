@@ -1733,11 +1733,7 @@ class FrigateTimelineCard extends HTMLElement {
         if (Math.abs(pos - (this._scrollSetPos ?? -9)) < 1) return; // our own write echoing back
         this._scrollSetPos = null;
         this._userScrollAt = performance.now();
-        const span = (this._windowHours || 24) * 3600000;
-        const { start, end } = this._dayRange(span);
-        const msPerPx = span / this._trackLen();
-        // Vertical runs newest-first, so its offset counts back from the end.
-        this._centerMs = this._vertical ? end - pos * msPerPx - span / 2 : start + pos * msPerPx + span / 2;
+        this._centerMs = this._centerFromScroll(pos);
         this._scheduleRender();
       },
       { passive: true }
@@ -1746,6 +1742,23 @@ class FrigateTimelineCard extends HTMLElement {
       const frac = this._fracFromPos(this._axisPos(e));
       if (frac != null) this._seekTo(frac);
     });
+  }
+
+  /** Window centre for a scroller offset. Vertical runs newest-first, so
+   * its offset counts back from the end of the day. */
+  _centerFromScroll(pos) {
+    const span = (this._windowHours || 24) * 3600000;
+    const { start, end } = this._dayRange(span);
+    const msPerPx = span / this._trackLen();
+    return this._vertical ? end - pos * msPerPx - span / 2 : start + pos * msPerPx + span / 2;
+  }
+
+  /** Scroller offset that shows `win`; the inverse of `_centerFromScroll`. */
+  _scrollPosFor(win) {
+    const span = win.end - win.start;
+    const day = this._dayRange(span);
+    const msPerPx = span / this._trackLen();
+    return (this._vertical ? day.end - win.end : win.start - day.start) / msPerPx;
   }
 
   /** Sizes the scroller to the day and moves it to the window on screen —
@@ -1770,7 +1783,7 @@ class FrigateTimelineCard extends HTMLElement {
     const day = this._dayRange(span);
     const msPerPx = span / this._trackLen();
     set(el.firstChild.style, this._vertical ? "height" : "width", `${Math.round((day.end - day.start) / msPerPx)}px`);
-    const pos = (this._vertical ? day.end - win.end : win.start - day.start) / msPerPx;
+    const pos = this._scrollPosFor(win);
     const cur = this._vertical ? el.scrollTop : el.scrollLeft;
     if (Math.abs(cur - pos) < 1) return;
     if (this._vertical) el.scrollTop = pos;
@@ -3045,9 +3058,9 @@ class FrigateTimelineCard extends HTMLElement {
 
   /** Lazily loads hls.js for browsers without native HLS (Safari/iOS/macOS
    * play .m3u8 natively via `<video src>`, no library needed there). */
-  // hls.js is bundled directly into the built card file (see build.sh) —
-  // `window.Hls` is already defined by the time this module runs, since the
-  // vendored bundle executes first in the same file. An external CDN load
+  // hls.js is bundled directly into the built card file (see build.sh),
+  // inside `loadVendoredHls()`, which defines `window.Hls` the first time a
+  // clip needs it. An external CDN load
   // was tried first and silently broke playback: many HA setups can't or
   // won't reach outbound script loads, so the <video> never got a source
   // and just sat black while the now-pill (set once from the click
@@ -3056,6 +3069,7 @@ class FrigateTimelineCard extends HTMLElement {
   // (which only manages the one declared `filename`) can't leave a sibling
   // dependency file un-fetched on a fresh install elsewhere.
   _loadHlsJs() {
+    if (!window.Hls && typeof loadVendoredHls === "function") loadVendoredHls();
     return window.Hls ? Promise.resolve() : Promise.reject(new Error("hls.js not bundled"));
   }
 

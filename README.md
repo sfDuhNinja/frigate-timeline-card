@@ -84,6 +84,10 @@ Live streams stop while the card is out of sight and start again on return — s
 
 If a camera drops intermittently, check what it is actually streaming: `frigate_stream: sub` is often the difference between a 4K HEVC stream and a 720p H.264 one, and three simultaneous 4K decodes is where hardware decoders start failing.
 
+## Development
+
+Edit `src/frigate-timeline-card.js`, then run `./build.sh` to produce the installed file. The bundled hls.js only runs on a browser that can't play HLS itself (Safari never needs it). `node --test test/` checks the day, zoom and scroll arithmetic and a few past regressions; CI runs it on every push.
+
 ## Why this exists
 
 Most Frigate/camera Lovelace cards bundle a full media gallery, thumbnails, PTZ, and more — genuinely useful, but heavy when all you want is "show me the camera live, and let me scrub through today's events." This card intentionally does one thing.
