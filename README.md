@@ -8,6 +8,7 @@ A minimal Home Assistant Lovelace card: a live camera view plus a horizontal, Fr
 
 - **Live view** over go2rtc's MSE stream, reached through the Frigate integration's own proxy so it stays same-origin with the dashboard — no mixed content on an https front end, and nothing that needs Frigate's address to be reachable from the device.
 - **No native video controls anywhere.** Every `<video>` runs with `controls=false` alongside the card's own play/pause and mute. The stream is also declared endless, so a fullscreen handover to Apple's player shows LIVE rather than a clock counting up.
+- **PTZ home button.** A camera that Frigate reports with a PTZ preset named `home` gets a house button in its controls, which calls `frigate.ptz` to move it there (and switches to live if a recording is playing). Cameras without that preset show no button.
 - **A timeline layered the way Frigate's own reads** — a white motion histogram over translucent bands, amber for a detection and red for an alert.
 - **Zoom & pan** — wheel or +/− on desktop, two-finger pinch on mobile; drag to pan once zoomed in, and dragging the selector into either end scrolls the window.
 - **Tap or scrub anywhere** to play from exactly there; playback carries on into the next stretch of footage when a clip ends. A "● LIVE" button returns to the present.
